@@ -1,0 +1,5 @@
+# Handling Reading
+include:      [".htaccess"]
+exclude:      ["assets", "node_modules"]
+keep_files:   [".git", ".svn"]
+encoding:     "utf-8"
