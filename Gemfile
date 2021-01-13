@@ -1,3 +1,3 @@
-ruby "2.4.1"
+ruby "2.7.2"
 source 'https://rubygems.org'
 gem 'github-pages', group: :jekyll_plugins
