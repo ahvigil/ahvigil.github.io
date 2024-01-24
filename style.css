@@ -10,6 +10,8 @@ body {
 }
 
 main {
+  user-select: none;
+  -webkit-user-select: none;
   display: flex;
   justify-content: center;
   align-items: center;
