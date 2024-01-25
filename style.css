@@ -16,3 +16,27 @@ main {
   justify-content: center;
   align-items: center;
 }
+
+a {
+  text-decoration: none;
+}
+
+/* unvisited link */
+a:link {
+  color: grey;
+}
+
+/* visited link */
+a:visited {
+  color: grey;
+}
+
+/* mouse over link */
+a:hover {
+  color: darkgrey;
+}
+
+/* selected link */
+a:active {
+  color: grey;
+}
