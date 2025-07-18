@@ -13,7 +13,7 @@ ansi_ramp80 = [
 ]
 
 if os.environ.get('TERM', 'dumb').find('256') > 0:
-    palette = map(lambda x: "38;5;%d" % x, ansi_ramp80)
+    palette = list(map(lambda x: "38;5;%d" % x, ansi_ramp80))
 else:
     palette = [39, 34, 35, 36, 31, 33, 32, 37]
 
@@ -71,8 +71,6 @@ def ansi_print(text, esc, file=None, newline=True, flush=False):
     
     if flush:
         file.flush()
-
-from StringIO import StringIO
 
 class M:
     def __init__ (self, width=100, height=100, x_pos=-0.5, y_pos=0, distance=6.75):
