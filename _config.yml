@@ -1,5 +1,1 @@
-# Handling Reading
-include:      [".htaccess"]
-exclude:      ["assets", "node_modules"]
-keep_files:   [".git", ".svn"]
-encoding:     "utf-8"
+exclude: ["Gemfile", "Gemfile.lock", "node_modules", "vendor"]
