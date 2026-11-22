@@ -34,6 +34,15 @@ LOCATIONS = [
     (-1.401155, 0.0, 0.2, 51),     # Feigenbaum point: period-doubling cascade
     (-1.7685, 0.0, 0.2, 58),       # minibrot on the main antenna
     (-0.1011, 0.9563, 0.04, 86),   # Misiurewicz point: spiraling filaments
+    (-0.660295, 0.438827, 0.1, 69),   # banded filaments off the main cardioid
+    (-1.234948, 0.164974, 0.02, 26),  # just outside the period-2 bulb
+    (-0.180977, 0.844923, 0.02, 36),  # edge of the period-3 bulb
+    (-0.558794, 0.627494, 0.1, 61),   # tendrils between the cardioid and top bulb
+    (0.393174, 0.370292, 0.02, 42),   # a bulb on the right edge of the cardioid
+    (0.149181, 0.655944, 0.02, 52),   # side bulb on the upper-right shoulder
+    (-0.465086, 0.625207, 0.005, 45),  # deep zoom: knotted bands
+    (-0.735379, 0.290928, 0.005, 42),  # deep zoom: seahorse valley wall
+    (-1.050426, 0.262645, 0.005, 30),  # deep zoom: outskirts of the period-2 bulb
 ]
 
 RAMP_STEPS = 80
