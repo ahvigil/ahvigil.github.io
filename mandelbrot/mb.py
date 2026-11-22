@@ -6,7 +6,7 @@ handful of interesting locations forever. Press Ctrl-C to quit.
 
     python3 mb.py                  # run the screensaver
     python3 mb.py --once           # draw one frame and exit
-    curl -s https://arthurvigil.com/static/mb.py | python3 - --speed 0.5
+    curl -s https://arthurvigil.com/mandelbrot/mb.py | python3 - --speed 0.5
 """
 import argparse
 import colorsys
