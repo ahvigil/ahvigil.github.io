@@ -11,12 +11,19 @@
     background: #000;
     overflow: hidden;
   }
-  canvas {
-    display: block;
-    width: 100vw;
-    height: 100vh;
+  #stage {
+    position: fixed;
+    inset: 0;
     cursor: zoom-in;
+    touch-action: none;
   }
+  #stage canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+  #stage canvas[hidden] { display: none; }
   #hud {
     position: fixed;
     right: 12px;
@@ -35,15 +42,25 @@
 </style>
 </head>
 <body>
-<canvas id="canvas" aria-label="Animated rendering of the Mandelbrot set"></canvas>
+<div id="stage" role="img" aria-label="Animated rendering of the Mandelbrot set">
+  <canvas id="gl" hidden></canvas>
+  <canvas id="cpu"></canvas>
+</div>
 <div id="hud"></div>
+<script src="core.js"></script>
+<script src="cpu.js"></script>
+<script src="gpu.js"></script>
+<script src="camera.js"></script>
+<script src="settings.js"></script>
 <script>
 "use strict";
 /*
  * High-definition canvas port of mb.py. Same locations and color curve,
- * rendered per pixel in background workers, cycling through the tour.
+ * rendered per pixel on the GPU or in background workers, cycling through
+ * the tour.
  *
- * Tour:     space = pause, n / right arrow = next, left arrow = previous
+ * Tour:     space = pause, n / right arrow = next, left arrow = previous,
+ *           r = reset to the start of the built-in tour
  * Anywhere: p = next palette (remembered), a = toggle auto color range,
  *           h = toggle high-resolution (perturbation) mode,
  *           o = coloring: auto -> orbit trap -> escape time
@@ -68,349 +85,49 @@
  *                 ?at=X,Y,DISTANCE[,MAX_COLOR] ?palette=NAME ?auto=0 ?hd=1
  *                 ?color=auto|trap|escape
  */
+/*
+ * Code layout. Classic scripts share one global scope; each file defines one
+ * global object and touches nothing else at load time (everything starts
+ * from init(), called at the bottom of this page):
+ *   core.js      pure math, no DOM: LOCATIONS, palettes, orbitValue,
+ *                perturbValue, renderBand, big numbers, reference orbits,
+ *                refWorker (reference orbits off the main thread)
+ *   cpu.js       cpuRenderer   gpu.js     gpuRenderer
+ *   camera.js    camera        settings.js settings
+ *   this page    state, setters, HUD, URL sync, keys, tour
+ *
+ * Renderer { name, available, canvas, init(), resize(w, h), setPalette(lut),
+ *            setTarget(t), frame(cam), status(), minDistance(x, y), stop() }
+ *   t   = { center: { x, y } (big), distance, maxColor, final, force }
+ *         The view to render. final = false is a draft while the camera
+ *         moves (the GPU renders it at reduced quality, the CPU ignores it);
+ *         final = true is the full-quality settled view. Repeating the same
+ *         target is a no-op unless force (settings changed).
+ *   cam = { center: { x, y } (big), distance }
+ *         What is on screen this frame. frame(cam) is called on every
+ *         animation frame: it draws the latest image(s) reprojected to cam
+ *         and advances pending work within a frame budget.
+ *   status() -> { done, range, effectiveIterations }
+ *         done: the last final target is fully rendered. range: colorRange()
+ *         result used ({ lo, hi, quantiles, smooth }), for the HUD.
+ *   stop()   abandon pending work (the renderer is being switched away);
+ *            the next final setTarget starts fresh.
+ *   Settings come from page globals, read at render time: iterations,
+ *   iterationScale, hiRes (CPU only), colorMode, autoRange, LUT, palette.
+ *   iterationsFor(distance) gives the base iteration count.
+ *
+ * camera { cam, target, init(), jumpTo(t), animateTo(t, how), refresh(),
+ *          onRendered }
+ *   how = "zoom" (eased click zoom) or "dive" (tour transition).
+ *   Pointer input lives in camera.js: click calls zoom(x, y, factor) here;
+ *   wheel/pinch/drag move the camera itself and report the new view with
+ *   moveTo(center, distance).
+ *
+ * Shared preferences: anim = { clickMs, dive, diveMs } and hold (ms).
+ */
 
-// [x, y, distance, maxColor], same as mb.py. The view's horizontal span is
-// distance / 3, so framing matches the terminal version.
-const LOCATIONS = [
-  [-0.5, 0.0, 6.75, 256],
-  [0.37865401, 0.669227668, 0.04, 111],
-  [-1.2693, -0.4145, 0.2, 105],
-  [-1.2693, -0.4145, 0.05, 97],
-  [-1.2642, -0.4185, 0.01, 95],
-  [-1.15, -0.28, 0.9, 94],
-  [-1.15, -0.28, 0.3, 58],
-  [-1.15, -0.28, 0.05, 26],
-  [-1.401155, 0.0, 0.2, 51],          // Feigenbaum point: period-doubling cascade
-  [-1.7685, 0.0, 0.2, 58],            // minibrot on the main antenna
-  [-0.1011, 0.9563, 0.04, 86],        // Misiurewicz point: spiraling filaments
-  [-0.660295, 0.438827, 0.1, 69],     // banded filaments off the main cardioid
-  [-1.234948, 0.164974, 0.02, 26],    // just outside the period-2 bulb
-  [-0.180977, 0.844923, 0.02, 36],    // edge of the period-3 bulb
-  [-0.558794, 0.627494, 0.1, 61],     // tendrils between the cardioid and top bulb
-  [0.393174, 0.370292, 0.02, 42],     // a bulb on the right edge of the cardioid
-  [0.149181, 0.655944, 0.02, 52],     // side bulb on the upper-right shoulder
-  [-0.465086, 0.625207, 0.005, 45],   // deep zoom: knotted bands
-  [-0.735379, 0.290928, 0.005, 42],   // deep zoom: seahorse valley wall
-  [-1.050426, 0.262645, 0.005, 30],   // deep zoom: outskirts of the period-2 bulb
-  // HD only: needs continuous color and thousands of iterations, so it
-  // renders as a single glyph in mb.py.
-  [-1.7796274664, -0.0002364244, 0.000003052, 3],  // deep in the antenna: beaded minibrot
-];
-
-const RAMP_STEPS = 80;
-const LUT_SIZE = 1024;
-const BAND_ROWS = 8;
-
-// Port of Python's colorsys.hsv_to_rgb (hue wraps around 1.0).
-function hsvToRgb(h, s, v) {
-  if (s === 0) return [v, v, v];
-  let i = Math.floor(h * 6);
-  const f = h * 6 - i;
-  const p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
-  i %= 6;
-  return [[v, t, p], [q, v, p], [p, v, t], [p, q, v], [t, p, v], [v, p, q]][i];
-}
-
-// Palettes map s in [0, 1] to a color, where s = 1 is the orbit that came
-// closest to the origin (the "#" glyph in mb.py, bright, hugging the set) and
-// s = 0 the farthest ("." glyph, the dark background). Gradient palettes are
-// lists of [position, [r, g, b]] stops; "terminal" is mb.py's HSV ramp.
-const PALETTES = {
-  ultra: [[0, [0, 4, 30]], [0.35, [20, 80, 180]], [0.7, [225, 245, 255]],
-          [0.86, [255, 170, 0]], [1, [255, 245, 210]]],
-  fire:  [[0, [0, 0, 0]], [0.3, [110, 8, 0]], [0.6, [225, 85, 0]],
-          [0.85, [255, 200, 40]], [1, [255, 255, 225]]],
-  ice:   [[0, [0, 2, 12]], [0.4, [8, 40, 115]], [0.75, [40, 170, 230]],
-          [1, [235, 255, 255]]],
-  neon:  [[0, [4, 0, 18]], [0.4, [75, 0, 135]], [0.7, [225, 30, 165]],
-          [0.9, [255, 170, 220]], [1, [255, 255, 255]]],
-  mono:  [[0, [0, 0, 0]], [1, [255, 255, 255]]],
-  terminal: null,
-};
-const PALETTE_NAMES = Object.keys(PALETTES);
-
-function buildLut(name) {
-  const stops = PALETTES[name];
-  const lut = new Uint8ClampedArray(LUT_SIZE * 3);
-  for (let i = 0; i < LUT_SIZE; i++) {
-    const s = i / (LUT_SIZE - 1);
-    let rgb;
-    if (!stops) {
-      // mb.py's ramp; brightness stands in for glyph density.
-      const u = s * (RAMP_STEPS - 1) / RAMP_STEPS;
-      const k = 255 * (0.06 + 0.94 * Math.pow(s, 1.3));
-      rgb = hsvToRgb(0.57 + u, 1 - u ** 3, 1).map((c) => c * k);
-    } else {
-      let j = 1;
-      while (j < stops.length - 1 && stops[j][0] < s) j++;
-      const [p0, c0] = stops[j - 1], [p1, c1] = stops[j];
-      let f = (s - p0) / (p1 - p0);
-      f = f * f * (3 - 2 * f);  // smoothstep between stops
-      rgb = c0.map((c, k) => c + (c1[k] - c) * f);
-    }
-    lut.set(rgb, i * 3);
-  }
-  return lut;
-}
-
-// Orbit-trap value as in mb.py, left continuous for smooth gradients:
-// 0 inside the set, otherwise 1..255 from the orbit's closest approach to 0.
-// With `smooth`, instead the continuous escape time (iterations to reach a
-// large bailout, fractional part from how far past it the orbit landed),
-// which keeps varying at every zoom depth.
-function orbitValue(cr, ci, iterations, smooth) {
-  // Skip the main cardioid and period-2 bulb: always inside the set.
-  const ci2 = ci * ci;
-  const q = (cr - 0.25) * (cr - 0.25) + ci2;
-  if (q * (q + (cr - 0.25)) <= 0.25 * ci2 || (cr + 1) * (cr + 1) + ci2 <= 0.0625) return 0;
-  let zr = 0, zi = 0, mind2 = 4;
-  const bailout = smooth ? 1e6 : 4;
-  for (let i = 0; i < iterations; i++) {
-    const t = zr * zr - zi * zi + cr;
-    zi = 2 * zr * zi + ci;
-    zr = t;
-    const d2 = zr * zr + zi * zi;
-    if (d2 >= bailout) {
-      return smooth ? i + 5 - Math.log2(Math.log2(d2) / 2)
-                    : Math.min(Math.sqrt(mind2) / 0.007, 254) + 1;
-    }
-    if (d2 < mind2) mind2 = d2;
-  }
-  return 0;
-}
-
-// The same value (orbit trap or smooth escape time) by perturbation: ref
-// holds the reference orbit Z_0..Z_{refLen-1} (interleaved re, im) of the
-// view center, and (dcr, dci) is this pixel's offset from the center.
-// Iterates dz, where z = Z_m + dz:
-//   dz' = 2 Z_m dz + dz^2 + dc
-// When z gets closer to 0 than dz (where dz would lose precision), or the
-// reference runs out (it escaped, or is shorter than needed), the orbit is
-// rebased onto the start of the reference: dz = z, m = 0. That keeps the
-// deltas accurate without any glitch detection.
-function perturbValue(dcr, dci, ref, refLen, iterations, smooth) {
-  let dzr = 0, dzi = 0, m = 0, mind2 = 4;
-  const bailout = smooth ? 1e6 : 4;
-  for (let i = 0; i < iterations; i++) {
-    const Zr = ref[2 * m], Zi = ref[2 * m + 1];
-    const t = 2 * (Zr * dzr - Zi * dzi) + dzr * dzr - dzi * dzi + dcr;
-    dzi = 2 * (Zr * dzi + Zi * dzr + dzr * dzi) + dci;
-    dzr = t;
-    m++;
-    const zr = ref[2 * m] + dzr, zi = ref[2 * m + 1] + dzi;
-    const d2 = zr * zr + zi * zi;
-    if (d2 >= bailout) {
-      return smooth ? i + 5 - Math.log2(Math.log2(d2) / 2)
-                    : Math.min(Math.sqrt(mind2) / 0.007, 254) + 1;
-    }
-    if (d2 < mind2) mind2 = d2;
-    if (d2 < dzr * dzr + dzi * dzi || m === refLen - 1) {
-      dzr = zr; dzi = zi; m = 0;
-    }
-  }
-  return 0;
-}
-
-// Renders a band of rows to RGBA, mapping values in [lo, hi] across the
-// palette. Shipped to the workers via toString() along with orbitValue and
-// perturbValue, so it must not reference anything else. In high-resolution
-// jobs (job.hd), xmin/ymin are offsets from the reference orbit's center.
-// Orbit-trap values are brightest near the set (small values); smooth escape
-// times are brightest near the set too, but there that means large values.
-function renderBand(job, lut, ref) {
-  const { width, y0, rows, xmin, ymin, step, iterations, lo, hi, quantiles, hd, smooth } = job;
-  const refLen = ref ? ref.length >> 1 : 0;
-  const qn = quantiles ? quantiles.length - 1 : 0;
-  const out = new Uint8ClampedArray(width * rows * 4);
-  const top = lut.length / 3 - 1;
-  const span = Math.max(hi - lo, 1e-9);
-  let o = 0;
-  for (let r = 0; r < rows; r++) {
-    const ci = ymin + (y0 + r) * step;
-    for (let ix = 0; ix < width; ix++, o += 4) {
-      out[o + 3] = 255;
-      const value = hd
-        ? perturbValue(xmin + ix * step, ci, ref, refLen, iterations, smooth)
-        : orbitValue(xmin + ix * step, ci, iterations, smooth);
-      if (value === 0) continue;  // inside the set: black
-      let rank;
-      if (quantiles) {
-        // Histogram equalization: rank of this value among on-screen samples.
-        let a = 0, b = qn;
-        if (value <= quantiles[0]) rank = 0;
-        else if (value >= quantiles[qn]) rank = 1;
-        else {
-          while (b - a > 1) { const m = (a + b) >> 1; if (quantiles[m] <= value) a = m; else b = m; }
-          const gap = quantiles[b] - quantiles[a];
-          rank = (a + (gap > 0 ? (value - quantiles[a]) / gap : 0)) / qn;
-        }
-      } else {
-        rank = Math.min(Math.max((value - lo) / span, 0), 1);
-      }
-      const s = smooth ? rank : 1 - rank;
-      const li = Math.round(s * top) * 3;
-      out[o] = lut[li];
-      out[o + 1] = lut[li + 1];
-      out[o + 2] = lut[li + 2];
-    }
-  }
-  return out;
-}
-
-function savedPalette() {
-  const fromUrl = new URLSearchParams(window.location.search).get("palette");
-  let stored = null;
-  try { stored = localStorage.getItem("mb-palette"); } catch (err) { /* file:// or private mode */ }
-  return [fromUrl, stored].find((p) => p in PALETTES) || "ultra";
-}
-let palette = savedPalette();
-let LUT = buildLut(palette);
-
-// --- workers ------------------------------------------------------------------
-
-const WORKER_SRC = `${orbitValue.toString()}
-${perturbValue.toString()}
-${renderBand.toString()}
-let lut = null, ref = null;
-onmessage = (e) => {
-  const d = e.data;
-  if (d.lut) { lut = d.lut; return; }
-  if (d.ref) { ref = d.ref; return; }
-  const out = renderBand(d.job, lut, ref);
-  postMessage({ gen: d.gen, y0: d.job.y0, rows: d.job.rows, out }, [out.buffer]);
-};`;
-
-let workers = [];
-try {
-  const url = URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" }));
-  const count = Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 12));
-  for (let k = 0; k < count; k++) {
-    const w = new Worker(url);
-    w.postMessage({ lut: LUT });
-    // If workers can't run here, fall back to the main thread once.
-    w.addEventListener("error", () => {
-      if (!workers.length) return;
-      workers.forEach((x) => x.terminate());
-      workers = [];
-      show(view);
-    }, { once: true });
-    workers.push(w);
-  }
-} catch (err) {
-  workers = [];  // fall back to rendering on the main thread
-}
-
-// --- big numbers ------------------------------------------------------------------
-
-// Fixed-point values { m, e } meaning m * 2^-e (m a BigInt), for view centers
-// and the reference orbit, which need more precision than doubles carry.
-
-// m * 2^-s, rounded (s may be negative).
-function shr(m, s) {
-  if (s <= 0) return m << BigInt(-s);
-  return (m + (1n << BigInt(s - 1))) >> BigInt(s);
-}
-
-const rescale = (a, e) => ({ m: shr(a.m, a.e - e), e });
-
-function bigAdd(a, b) {
-  const e = Math.max(a.e, b.e);
-  return { m: rescale(a, e).m + rescale(b, e).m, e };
-}
-
-// Exact: every double is a dyadic rational.
-function bigFromDouble(v, e) {
-  const view = new DataView(new ArrayBuffer(8));
-  view.setFloat64(0, v);
-  const bits = view.getBigUint64(0);
-  const biased = Number((bits >> 52n) & 0x7ffn);
-  let mant = bits & ((1n << 52n) - 1n);
-  if (biased) mant |= 1n << 52n;
-  // v = mant * 2^(exponent - 1075)
-  const m = shr(mant, 1075 - Math.max(biased, 1) - e);
-  return { m: bits >> 63n ? -m : m, e };
-}
-
-// Parses decimal text such as "-1.77962746640001" or "3.05e-6" without
-// rounding through a double first. Returns null if it isn't a number.
-function bigFromString(text, e) {
-  const match = /^\s*([+-]?)(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?\s*$/i.exec(text);
-  if (!match || !(match[2] + (match[3] || ""))) return null;
-  const digits = BigInt(match[2] + (match[3] || ""));
-  const exp10 = parseInt(match[4] || "0", 10) - (match[3] || "").length;
-  let m;
-  if (exp10 >= 0) {
-    m = (digits * 10n ** BigInt(exp10)) << BigInt(e);
-  } else {
-    const den = 10n ** BigInt(-exp10);
-    m = ((digits << BigInt(e + 1)) + den) / (2n * den);  // rounded
-  }
-  return { m: match[1] === "-" ? -m : m, e };
-}
-
-function bigToDouble(a) {
-  // Number() rounds correctly but overflows past 2^1024, so shift first.
-  // Fast path for values near 1 (the reference orbit); tiny values keep 64
-  // significant bits instead.
-  let s = Math.max(0, a.e - 1000);
-  let x = Number(shr(a.m, s));
-  if (s > 0 && Math.abs(x) < 2 ** 64) {
-    const bits = (a.m < 0n ? -a.m : a.m).toString(16).length * 4;
-    s = Math.max(0, bits - 64);
-    x = Number(shr(a.m, s));
-  }
-  const p = s - a.e;  // split the scaling so 2^p can't underflow on its own
-  return x * 2 ** Math.ceil(p / 2) * 2 ** Math.floor(p / 2);
-}
-
-// Decimal text with `digits` places, trailing zeros trimmed.
-function bigToString(a, digits) {
-  const neg = a.m < 0n;
-  const scaled = shr((neg ? -a.m : a.m) * 10n ** BigInt(digits), a.e);
-  const s = scaled.toString().padStart(digits + 1, "0");
-  const frac = s.slice(-digits).replace(/0+$/, "");
-  const text = s.slice(0, -digits) + (frac ? "." + frac : "");
-  return neg && scaled !== 0n ? "-" + text : text;
-}
-
-// Fractional bits for a view with this pixel step: enough to place the
-// center well below one pixel, with headroom for the reference orbit.
-const precisionFor = (step) => Math.max(64, Math.ceil(-Math.log2(step)) + 64);
-
-// Reference orbit Z_0 = 0, Z_{n+1} = Z_n^2 + C in fixed point, stored as
-// doubles. Extended on demand, stopping early once it escapes.
-function makeReference(cx, cy) {
-  return { cx: cx.m, cy: cy.m, e: cx.e, zx: 0n, zy: 0n, len: 1, escaped: false,
-           data: new Float64Array(2 * 1024) };
-}
-
-function extendReference(ref, iters) {
-  if (ref.escaped || ref.len > iters) return;
-  const E = BigInt(ref.e), E1 = E - 1n, { cx, cy, e } = ref;
-  let { zx, zy, len, data } = ref;
-  if (data.length < 2 * (iters + 1)) {
-    const grown = new Float64Array(2 * (iters + 1));
-    grown.set(data.subarray(0, 2 * len));
-    data = grown;
-  }
-  while (len <= iters) {
-    const nx = ((zx * zx - zy * zy) >> E) + cx;
-    zy = ((zx * zy) >> E1) + cy;
-    zx = nx;
-    const r = bigToDouble({ m: zx, e }), i = bigToDouble({ m: zy, e });
-    data[2 * len] = r;
-    data[2 * len + 1] = i;
-    len++;
-    if (r * r + i * i > 4) { ref.escaped = true; break; }
-  }
-  Object.assign(ref, { zx, zy, len, data });
-}
-
-// --- page -----------------------------------------------------------------------
-
-const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
 const hud = document.getElementById("hud");
+const stage = document.getElementById("stage");
 
 const params = new URLSearchParams(window.location.search);
 const num = (key, fallback) => {
@@ -418,11 +135,22 @@ const num = (key, fallback) => {
   return Number.isFinite(v) ? v : fallback;
 };
 
+function stored(key) {
+  try { return localStorage.getItem(key); } catch (err) { return null; }  // file:// or private mode
+}
+function store(key, value) {
+  try { localStorage.setItem(key, value); } catch (err) { /* ignore */ }
+}
+
+let palette = [params.get("palette"), stored("mb-palette")].find((p) => p in PALETTES) || "ultra";
+let LUT = buildLut(palette);
+
 let locations = LOCATIONS;
 let once = params.has("once");
 const atText = (params.get("at") || "").split(",");
 const at = atText.map(Number);
-let centers = LOCATIONS.map(([x, y]) => ({ x: bigFromDouble(x, 64), y: bigFromDouble(y, 64) }));
+const TOUR_CENTERS = LOCATIONS.map(([x, y]) => ({ x: bigFromDouble(x, 64), y: bigFromDouble(y, 64) }));
+let centers = TOUR_CENTERS;
 if (at.length >= 3 && at.length <= 4 && at.every(Number.isFinite)) {
   locations = [[at[0], at[1], at[2], at[3] || 256]];
   // Keep every digit given: ?at= may be deeper than doubles can represent.
@@ -431,171 +159,90 @@ if (at.length >= 3 && at.length <= 4 && at.every(Number.isFinite)) {
   centers = [{ x: exact(0), y: exact(1) }];
   once = true;
 }
-const n = locations.length;
-const hold = Math.max(0, num("hold", 5)) * 1000;
+let n = locations.length;
 let iterations = Math.max(1, Math.floor(num("iterations", 500)));
 let current = ((Math.floor(num("location", 0)) % n) + n) % n;
-let view = locations[current].slice();
-let center = centers[current];  // exact view center; view[0..1] round it to doubles
-let hiRes = params.get("hd") === "1";  // perturbation rendering
-let reference = null;           // reference orbit for the current hi-res view
+let view = locations[current].slice();  // [x, y, distance, maxColor] of the target
+let center = centers[current];  // exact target center; view[0..1] round it to doubles
+let hiRes = params.get("hd") === "1";  // perturbation rendering (CPU renderer)
 let mode = "tour";            // "tour" or "explore"
 let paused = false;
-let holdTimer = 0, hudTimer = 0;
-let gen = 0, cancel = null, geometry = null, rendered = false;
+let holdTimer = 0, hudTimer = 0, saveTimer = 0;
+let rendered = false;
 let autoRange = params.get("auto") !== "0";  // stretch colors to what's on screen
 const COLOR_MODES = ["auto", "trap", "escape"];  // orbit trap, escape time, or pick
 let colorMode = COLOR_MODES.includes(params.get("color")) ? params.get("color") : "auto";
-let range = null;                            // { lo, hi } used by the last render
-let effectiveIterations = iterations;
-
-const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
-
-function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.width = Math.round(window.innerWidth * dpr);
-  canvas.height = Math.round(window.innerHeight * dpr);
-}
+let anim = { clickMs: 500, dive: true, diveMs: 4000 };
+try { anim = { ...anim, ...JSON.parse(stored("mb-anim") || "{}") }; } catch (err) { /* ignore */ }
+// Tour hold (ms): ?hold= wins, then the saved preference, then 5 s.
+let hold = params.has("hold") ? Math.max(0, num("hold", 5)) * 1000
+  : Number.isFinite(anim.hold) ? Math.max(0, anim.hold) : 5000;
+const RENDERERS = ["auto", "gpu", "cpu"];
+let rendererPref = params.get("gpu") === "0" ? "cpu"
+  : RENDERERS.includes(stored("mb-renderer")) ? stored("mb-renderer") : "auto";
+let renderer = cpuRenderer;
 
 // Deeper zooms need more iterations to resolve detail near the set.
 let iterationScale = 1;  // adjusted with - and +
 const iterationsFor = (distance) =>
   Math.round(Math.max(iterations, 200 * Math.log10(6.75 / distance)));
 
-// Orbit values on a coarse grid of about `count` points across the view
-// (0 for points that never escaped).
-function sampleView(width, height, iters, count, smooth = false) {
-  const k = Math.max(1, Math.ceil(Math.sqrt((width * height) / count)));
-  const { xmin, ymin, step, hd } = geometry;
-  if (hd) extendReference(reference, iters);
-  const values = [];
-  for (let py = k >> 1; py < height; py += k) {
-    for (let px = k >> 1; px < width; px += k) {
-      const cr = xmin + px * step, ci = ymin + py * step;
-      values.push(hd
-        ? perturbValue(cr, ci, reference.data, reference.len, iters, smooth)
-        : orbitValue(cr, ci, iters, smooth));
-    }
-  }
-  return values;
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  renderer.resize(Math.round(window.innerWidth * dpr), Math.round(window.innerHeight * dpr));
 }
 
-// Some regions (the antenna especially) escape far more slowly than zoom
-// depth suggests. Keep doubling iterations while that still turns a
-// meaningful share of "inside" samples into escaped ones.
-function adaptIterations(width, height, iters) {
-  const stuck = (it) => sampleView(width, height, it, 4000).filter((v) => v === 0).length / 4000;
-  let current = stuck(iters);
-  while (iters < (1 << 16) && current > 0.002) {
-    const next = stuck(iters * 2);
-    if (current - next < 0.005) break;
-    iters *= 2;
-    current = next;
+const target = () => ({ center, distance: view[2], maxColor: view[3] });
+
+// --- setters (shared by keys and the settings dialog) ------------------------------
+
+// Picks the renderer: "auto" (GPU if available), "gpu" or "cpu".
+function setRenderer(pref) {
+  rendererPref = pref;
+  if (params.get("gpu") !== "0") store("mb-renderer", pref);
+  const next = pref !== "cpu" && gpuRenderer.available ? gpuRenderer : cpuRenderer;
+  if (next !== renderer) {
+    renderer.canvas.hidden = true;
+    renderer.stop();
+    renderer = next;
+    renderer.canvas.hidden = false;
+    resize();
+    rerender();
   }
-  return iters;
 }
 
-// How values map onto the palette. Auto mode equalizes: colors are assigned by
-// rank among on-screen samples, so the whole palette is used even when the
-// values bunch up. Otherwise it reproduces mb.py's (value + 1) / max_color.
-// lo/hi (1st-98th percentile) are kept for the max_color shown and copied.
-//
-// Deep in, the orbit trap stops working: it's set within the first few
-// iterations, where neighboring pixels' orbits are identical in doubles, so
-// many pixels get exactly the same value. When repeats show up on screen
-// (normal views have essentially none), switch to (equalized) smooth escape
-// time, which doesn't.
-function colorRange(width, height, iters, maxColor) {
-  const equalize = (values) => {
-    if (values.length < 50) return null;
-    values.sort((a, b) => a - b);
-    const lo = values[Math.floor(values.length * 0.01)];
-    const hi = values[Math.floor(values.length * 0.98)];
-    const quantiles = Array.from({ length: 257 }, (_, i) =>
-      values[Math.floor((i / 256) * (values.length - 1))]);
-    return { lo, hi: Math.max(hi, lo + 1), quantiles, smooth: false };
-  };
-  const escape = () => {
-    const r = equalize(sampleView(width, height, iters, 20000, true).filter((v) => v));
-    return r && { ...r, smooth: true };
-  };
-  if (colorMode === "escape") {
-    const r = escape();
-    if (r) return r;
-  }
-  const samples = sampleView(width, height, iters, 20000).filter((v) => v);
-  const repeats = 1 - new Set(samples).size / samples.length;
-  const trap = equalize(samples);
-  if (colorMode === "auto" && trap && repeats > 0.05) {
-    const r = escape();
-    if (r) return r;
-  }
-  if (autoRange && trap) return trap;
-  return { lo: -1, hi: maxColor - 1, quantiles: null, smooth: false };
+function setHiRes(on) { hiRes = on; rerender(); }
+function setColorMode(m) { colorMode = m; rerender(); }
+function cycleColorMode() { setColorMode(COLOR_MODES[(COLOR_MODES.indexOf(colorMode) + 1) % COLOR_MODES.length]); }
+function setAutoRange(on) { autoRange = on; rerender(); }
+function setPalette(name) {
+  palette = name;
+  LUT = buildLut(palette);
+  cpuRenderer.setPalette(LUT);
+  gpuRenderer.setPalette(LUT);
+  store("mb-palette", palette);
+  rerender();
 }
-// Renders a view progressively. Resolves true when complete, false if a
-// newer render superseded it.
-function render([x, y, distance, maxColor]) {
-  if (cancel) cancel(false);
-  const my = ++gen;
-  const width = canvas.width, height = canvas.height;
-  const step = distance / 3 / width;
-  if (hiRes) {
-    // Pixels are offsets from the exact center, whose orbit is the reference.
-    const e = precisionFor(step);
-    const cx = rescale(center.x, e), cy = rescale(center.y, e);
-    if (!reference || reference.cx !== cx.m || reference.cy !== cy.m || reference.e !== e) {
-      reference = makeReference(cx, cy);
-    }
-    geometry = { xmin: -(step * width) / 2, ymin: -(step * height) / 2, step, hd: true };
-  } else {
-    geometry = { xmin: x - (step * width) / 2, ymin: y - (step * height) / 2, step, hd: false };
-  }
-  const iters = effectiveIterations = Math.min(1 << 16, Math.max(50, Math.round(
-    adaptIterations(width, height, iterationsFor(distance)) * iterationScale)));
-  range = colorRange(width, height, iters, maxColor);
-  let ref = null;
-  if (hiRes) {
-    extendReference(reference, iters);
-    ref = reference.data.slice(0, 2 * reference.len);
-    workers.forEach((w) => w.postMessage({ ref }));
-  }
-  const jobs = [];
-  for (let y0 = 0; y0 < height; y0 += BAND_ROWS) {
-    jobs.push({ width, y0, rows: Math.min(BAND_ROWS, height - y0), ...geometry, iterations: iters, ...range });
-  }
-  const draw = (y0, rows, out) => ctx.putImageData(new ImageData(out, width, rows), 0, y0);
+function setIterationScale(s) { iterationScale = s; rerender(); }
+function setMaxColor(maxColor) { view[3] = maxColor; autoRange = false; rerender(); }
+function setAnim(prefs) {
+  anim = { ...anim, ...prefs };
+  if (Number.isFinite(prefs.hold)) hold = prefs.hold;
+  store("mb-anim", JSON.stringify(anim));
+  scheduleAdvance();
+}
 
-  return new Promise((resolve) => {
-    cancel = resolve;
-    let next = 0, done = 0;
-    const complete = () => {
-      if (++done === jobs.length && gen === my) { cancel = null; resolve(true); }
-    };
-    if (workers.length) {
-      const feed = (w) => { if (gen === my && next < jobs.length) w.postMessage({ gen: my, job: jobs[next++] }); };
-      for (const w of workers) {
-        w.onmessage = (e) => {
-          const d = e.data;
-          if (d.gen !== my) return;
-          draw(d.y0, d.rows, d.out);
-          complete();
-          feed(w);
-        };
-        feed(w);
-      }
-    } else {
-      (async () => {
-        for (const job of jobs) {
-          if (gen !== my) return;
-          draw(job.y0, job.rows, renderBand(job, LUT, ref));
-          complete();
-          if (job.y0 % (BAND_ROWS * 8) === 0) await nextFrame();
-        }
-      })();
-    }
-  });
+// Re-renders the current target after a settings change.
+function rerender() {
+  rendered = false;
+  clearTimeout(holdTimer);
+  camera.target = { ...camera.target, ...target() };
+  camera.refresh();
+  saveState();
+  updateHud();
 }
+
+// --- HUD and URL -------------------------------------------------------------------
 
 // Enough decimal places to place the view to well under a pixel.
 function fmt(v, distance) {
@@ -603,8 +250,10 @@ function fmt(v, distance) {
 }
 
 // max_color for mb.py: in auto mode, the top of the measured range.
-const currentMaxColor = () =>
-  Math.round(autoRange && range && !range.smooth ? range.hi + 1 : view[3]);
+function currentMaxColor() {
+  const { range } = renderer.status();
+  return Math.round(autoRange && range && !range.smooth ? range.hi + 1 : view[3]);
+}
 
 function coords() {
   const distance = view[2];
@@ -612,9 +261,11 @@ function coords() {
 }
 
 function colorInfo() {
+  const { range } = renderer.status();
   const coloring = range && range.smooth
     ? "escape time" : `orbit trap (${autoRange ? "auto" : "fixed"} range)`;
-  return `${palette}, ${colorMode} color: ${coloring}, ${hiRes ? "hi-res" : "lo-res"}`;
+  const precision = renderer.name === "gpu" ? "gpu" : hiRes ? "hi-res" : "lo-res";
+  return `${palette}, ${colorMode} color: ${coloring}, ${precision}`;
 }
 
 function showHud(text, sticky = false) {
@@ -626,9 +277,9 @@ function showHud(text, sticky = false) {
 
 function updateHud(extra = "") {
   if (mode === "explore") {
-    showHud(`${coords()}   iterations ${effectiveIterations}   ${colorInfo()}${extra}\n` +
-            "click: in  shift-click: out  p: palette  a: auto color  [ ]: color range\n" +
-            "- +: iterations  h: hi-res  o: coloring  c: copy  esc: back", true);
+    showHud(`${coords()}   iterations ${renderer.status().effectiveIterations}   ${colorInfo()}${extra}\n` +
+            "click: in  shift-click: out  wheel: zoom  drag: pan  p: palette  a: auto color\n" +
+            "[ ]: color range  - +: iterations  h: hi-res  o: coloring  c: copy  s: settings  r: reset  esc: back", true);
   } else {
     const [x, y, distance] = view;
     showHud(`${current + 1}/${n}  ${x}, ${y}  distance ${distance}   ${colorInfo()}` +
@@ -649,6 +300,7 @@ function saveState() {
   if (hiRes) q.set("hd", "1"); else q.delete("hd");
   if (autoRange) q.delete("auto"); else q.set("auto", "0");
   if (colorMode === "auto") q.delete("color"); else q.set("color", colorMode);
+  if (!once) q.delete("once");
   if (q.has("palette")) q.set("palette", palette);
   const text = q.toString().replace(/%2C/g, ",");
   try {
@@ -656,15 +308,23 @@ function saveState() {
   } catch (err) { /* some file:// setups refuse */ }
 }
 
-async function show(v) {
+// --- navigation --------------------------------------------------------------------
+
+// Shows view v (with center already set): how = "jump" (cut), "zoom" (eased
+// click zoom) or "dive" (tour transition).
+function show(v, how = "jump") {
   clearTimeout(holdTimer);
   view = v;
   rendered = false;
-  const done = render(view);  // sets up range synchronously, used by coords()
   saveState();
-  const ok = await done;
-  if (!ok) return;
+  if (how === "jump") camera.jumpTo(target());
+  else camera.animateTo(target(), how);
+}
+
+function onRendered() {
   rendered = true;
+  saveState();
+  if (hud.classList.contains("show")) updateHud();
   scheduleAdvance();
 }
 
@@ -675,53 +335,79 @@ function scheduleAdvance() {
   }
 }
 
+// Back to the start of the built-in tour, as on a fresh load: drops a ?at=
+// view and ?once, unpauses, and resets the iteration multiplier. Palette and
+// coloring preferences stay.
+function resetTour() {
+  locations = LOCATIONS;
+  centers = TOUR_CENTERS;
+  n = LOCATIONS.length;
+  once = false;
+  paused = false;
+  iterationScale = 1;
+  current = 0;
+  go(0);
+}
+
 function go(delta) {
+  const moving = delta !== 0 || mode === "explore";
   mode = "tour";
   current = (((current + delta) % n) + n) % n;
   center = centers[current];
-  show(locations[current].slice());
+  show(locations[current].slice(), moving && anim.dive && renderer.name === "gpu" ? "dive" : "jump");
   updateHud();
 }
 
-function zoom(e, factor) {
-  if (!geometry) return;
-  const px = (e.offsetX * canvas.width) / canvas.clientWidth;
-  const py = (e.offsetY * canvas.height) / canvas.clientHeight;
-  // Offset of the clicked point from the view center.
-  const dx = (px - canvas.width / 2) * geometry.step;
-  const dy = (py - canvas.height / 2) * geometry.step;
-  mode = "explore";
+// Click zoom: (x, y) in CSS pixels on the stage. The clicked point (relative
+// to what's on screen now) becomes the new center.
+function zoom(x, y, factor) {
+  const cam = camera.cam;
+  if (!cam) return;
+  const step = cam.distance / 3 / stage.clientWidth;
+  const dx = (x - stage.clientWidth / 2) * step;
+  const dy = (y - stage.clientHeight / 2) * step;
   const distance = view[2] * factor;
-  if (distance < minDistance(view[0] + dx, view[1] + dy)) {
-    updateHud(hiRes
-      ? "\nmax zoom: pixel offsets would underflow 64-bit floats"
+  // Never drop bits the center already has, so zooming back in returns exactly.
+  const bits = Math.max(precisionFor(distance / 3 / 8192), cam.center.x.e, cam.center.y.e);
+  const c = {
+    x: bigAdd(rescale(cam.center.x, bits), bigFromDouble(dx, bits)),
+    y: bigAdd(rescale(cam.center.y, bits), bigFromDouble(dy, bits)),
+  };
+  if (factor < 1 && distance < renderer.minDistance(bigToDouble(c.x), bigToDouble(c.y))) {
+    updateHud(renderer.name === "gpu" || hiRes
+      ? "\nmax zoom: pixel offsets would underflow"
       : "\nmax zoom: 64-bit floats can't resolve any deeper here (h: hi-res)");
     return;
   }
-  // Move the exact center in both modes, so switching later keeps the point.
-  const bits = precisionFor(distance / 3 / canvas.width);
-  center = {
-    x: bigAdd(rescale(center.x, bits), bigFromDouble(dx, bits)),
-    y: bigAdd(rescale(center.y, bits), bigFromDouble(dy, bits)),
-  };
-  show([bigToDouble(center.x), bigToDouble(center.y), distance, view[3]]);
+  mode = "explore";
+  center = c;
+  show([bigToDouble(c.x), bigToDouble(c.y), distance, view[3]], "zoom");
   updateHud();
 }
 
-// Smallest view distance that still renders sharply. In low resolution, any
-// deeper and neighboring pixels round to the same 64-bit float, so the image
-// turns into blocks (with headroom for rounding error that builds up during
-// iteration). In high resolution only the per-pixel offsets are doubles, so
-// the limit is where they would underflow.
-function minDistance(x, y) {
-  if (hiRes) return 1e-290;
-  const minStep = 8 * Number.EPSILON * Math.max(Math.abs(x), Math.abs(y), 1);
-  return 3 * canvas.width * minStep;
+// Wheel, pinch and drag: the camera already shows (center, distance); make it
+// the page's view too. Returns false (and leaves the view) past the zoom
+// limit, so the camera can stop there.
+function moveTo(c, distance) {
+  // Only refuse going deeper: a view already past the limit (e.g. after
+  // switching to lo-res) can still pan and zoom out.
+  if (distance < view[2] && distance < renderer.minDistance(bigToDouble(c.x), bigToDouble(c.y))) return false;
+  clearTimeout(holdTimer);
+  mode = "explore";
+  rendered = false;
+  center = c;
+  view = [bigToDouble(c.x), bigToDouble(c.y), distance, view[3]];
+  if (hud.classList.contains("show")) updateHud();
+  // Throttled: browsers rate-limit history.replaceState.
+  if (!saveTimer) saveTimer = setTimeout(() => { saveTimer = 0; saveState(); }, 300);
+  return true;
 }
 
-canvas.addEventListener("click", (e) => zoom(e, e.shiftKey ? 4 : 0.25));
+// --- keys --------------------------------------------------------------------------
 
 document.addEventListener("keydown", (e) => {
+  if (settings.isOpen() || (e.target instanceof Element && e.target.closest("input, select, textarea, dialog"))) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
   switch (e.key) {
     case " ":
       e.preventDefault();
@@ -736,29 +422,16 @@ document.addEventListener("keydown", (e) => {
     case "[": case "]":
       if (mode !== "explore") break;
       // Manual adjustment starts from whatever range is on screen now.
-      view[3] = Math.max(2, currentMaxColor() * (e.key === "]" ? 1.25 : 0.8));
-      autoRange = false;
-      show(view); updateHud(); break;
-    case "o":
-      colorMode = COLOR_MODES[(COLOR_MODES.indexOf(colorMode) + 1) % COLOR_MODES.length];
-      show(view); updateHud(); break;
-    case "a":
-      autoRange = !autoRange;
-      show(view); updateHud(); break;
-    case "h":
-      hiRes = !hiRes;
-      show(view); updateHud(); break;
-    case "p": {
-      palette = PALETTE_NAMES[(PALETTE_NAMES.indexOf(palette) + 1) % PALETTE_NAMES.length];
-      LUT = buildLut(palette);
-      workers.forEach((w) => w.postMessage({ lut: LUT }));
-      try { localStorage.setItem("mb-palette", palette); } catch (err) { /* ignore */ }
-      show(view); updateHud(); break;
-    }
+      setMaxColor(Math.max(2, currentMaxColor() * (e.key === "]" ? 1.25 : 0.8)));
+      break;
+    case "o": cycleColorMode(); break;
+    case "a": setAutoRange(!autoRange); break;
+    case "h": setHiRes(!hiRes); break;
+    case "p": setPalette(PALETTE_NAMES[(PALETTE_NAMES.indexOf(palette) + 1) % PALETTE_NAMES.length]); break;
     case "-": case "+": case "=":
       if (mode !== "explore") break;
-      iterationScale *= e.key === "-" ? 0.5 : 2;
-      show(view); updateHud(); break;
+      setIterationScale(iterationScale * (e.key === "-" ? 0.5 : 2));
+      break;
     case "c":
       if (mode !== "explore") break;
       if (navigator.clipboard) {
@@ -766,18 +439,28 @@ document.addEventListener("keydown", (e) => {
           () => updateHud("   copied"), () => updateHud("   copy failed"));
       }
       break;
+    case "s": settings.open(); break;
+    case "r": resetTour(); break;
   }
 });
 
 let resizeTimer = 0;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => { resize(); show(view); }, 200);
+  resizeTimer = setTimeout(() => { resize(); rerender(); }, 200);
 });
 
+// --- start -------------------------------------------------------------------------
+
+cpuRenderer.init();
+gpuRenderer.init();
+camera.onRendered = onRendered;
+camera.init();
+settings.init();
+setRenderer(rendererPref);
 resize();
 show(view);
-showHud(`${current + 1}/${n}   click: zoom in  space: pause  n: next  p: palette  a: auto color  h: hi-res  o: coloring`);
+showHud(`${current + 1}/${n}   click: zoom in  space: pause  n: next  p: palette  a: auto color  h: hi-res  o: coloring  s: settings  r: reset`);
 </script>
 </body>
 </html>
