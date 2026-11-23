@@ -97,6 +97,9 @@
  * URL parameters: ?location=N ?iterations=N ?hold=SECONDS ?once
  *                 ?at=X,Y,DISTANCE[,MAX_COLOR] ?palette=NAME ?auto=0 ?hd=1
  *                 ?color=auto|trap|escape ?map=equal|blend|bands|cycles
+ *                 ?renderer=auto|gpu|cpu (?gpu=0 = cpu) ?scale=N (iteration
+ *                 multiplier, 1/8 to 16) ?speed=slow|relaxed|brisk|fast|N
+ *                 ?dive=0|1
  */
 /*
  * Code layout. Classic scripts share one global scope; each file defines one
@@ -226,16 +229,30 @@ try { anim = { ...anim, ...JSON.parse(stored("mb-anim") || "{}") }; } catch (err
 // replaced them): ignore values saved by older versions.
 anim.clickMs = 500;
 anim.diveMs = 4000;
+// URL overrides for this visit (not saved unless changed in settings):
+// ?speed=slow|relaxed|brisk|fast or e-folds per second, ?dive=0|1.
+const SPEED_NAMES = { slow: 1.25, relaxed: 2, brisk: 3.5, fast: 6 };
+if (params.has("speed")) {
+  const v = SPEED_NAMES[params.get("speed")] || num("speed", 0);
+  if (v > 0) anim.speed = Math.min(Math.max(v, 0.25), 20);
+}
+if (params.has("dive")) anim.dive = params.get("dive") !== "0";
 // Tour hold (ms): ?hold= wins, then the saved preference, then 5 s.
 let hold = params.has("hold") ? Math.max(0, num("hold", 5)) * 1000
   : Number.isFinite(anim.hold) ? Math.max(0, anim.hold) : 5000;
 const RENDERERS = ["auto", "gpu", "cpu"];
-let rendererPref = params.get("gpu") === "0" ? "cpu"
-  : RENDERERS.includes(stored("mb-renderer")) ? stored("mb-renderer") : "auto";
+// ?renderer=auto|gpu|cpu (or the older ?gpu=0) wins for this visit and isn't saved.
+const rendererParam = params.get("gpu") === "0" ? "cpu"
+  : RENDERERS.includes(params.get("renderer")) ? params.get("renderer") : null;
+let rendererPref = rendererParam
+  || (RENDERERS.includes(stored("mb-renderer")) ? stored("mb-renderer") : "auto");
 let renderer = cpuRenderer;
 
 // Deeper zooms need more iterations to resolve detail near the set.
-let iterationScale = 1;  // adjusted with - and +
+// Iteration multiplier, adjusted with - and +; ?scale= sets it (a power of
+// two from 1/8 to 16, as in settings).
+const scaleParam = num("scale", 1);
+let iterationScale = scaleParam > 0 ? 2 ** Math.min(4, Math.max(-3, Math.round(Math.log2(scaleParam)))) : 1;
 const iterationsFor = (distance) =>
   Math.round(Math.max(iterations, 200 * Math.log10(6.75 / distance)));
 
@@ -251,7 +268,7 @@ const target = () => ({ center, distance: view[2], maxColor: view[3] });
 // Picks the renderer: "auto" (GPU if available), "gpu" or "cpu".
 function setRenderer(pref) {
   rendererPref = pref;
-  if (params.get("gpu") !== "0") store("mb-renderer", pref);
+  if (!rendererParam) store("mb-renderer", pref);
   const next = pref !== "cpu" && gpuRenderer.available ? gpuRenderer : cpuRenderer;
   if (next !== renderer) {
     renderer.canvas.hidden = true;
