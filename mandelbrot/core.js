@@ -267,31 +267,59 @@ const precisionFor = (step) => Math.max(64, Math.ceil(-Math.log2(step)) + 64);
 
 // Reference orbit Z_0 = 0, Z_{n+1} = Z_n^2 + C in fixed point, stored as
 // doubles. Extended on demand, stopping early once it escapes.
+//
+// Points inside the set (every tour stop is a minibrot nucleus, and dives
+// toward one stay inside its component) are attracted to a cycle, and the
+// fixed-point map, being deterministic on a finite state, then repeats
+// exactly. Brent's cycle detection (compare each state with one saved at the
+// last power of two) finds that within a couple of periods, after which the
+// rest of the orbit is a copy: bit-for-bit what iterating would produce, at
+// none of the BigInt cost. period = 0 until a cycle is found; (sx, sy) is the
+// saved state Z_mark.
 function makeReference(cx, cy) {
   return { cx: cx.m, cy: cy.m, e: cx.e, zx: 0n, zy: 0n, len: 1, escaped: false,
-           data: new Float64Array(2 * 1024) };
+           period: 0, sx: 0n, sy: 0n, mark: 0, data: new Float64Array(2 * 1024) };
 }
 
 function extendReference(ref, iters) {
   if (ref.escaped || ref.len > iters) return;
   const E = BigInt(ref.e), E1 = E - 1n, { cx, cy, e } = ref;
-  let { zx, zy, len, data } = ref;
+  let { zx, zy, len, data, period, sx, sy, mark } = ref;
   if (data.length < 2 * (iters + 1)) {
-    const grown = new Float64Array(2 * (iters + 1));
+    // Grow geometrically: the GPU renderer doubles its limit step by step.
+    const grown = new Float64Array(2 * Math.max(iters + 1, data.length));
     grown.set(data.subarray(0, 2 * len));
     data = grown;
   }
-  while (len <= iters) {
-    const nx = ((zx * zx - zy * zy) >> E) + cx;
+  // bigToDouble inlined, minus its allocations and constant work: the same
+  // rounded shift (none below 1000 bits), Number() and two powers of two.
+  // Its rescue path for values under 2^64 after the shift (Z within 2^-936
+  // of 0) is left to bigToDouble itself.
+  const s = Math.max(0, e - 1000), S = BigInt(s), half = s ? 1n << BigInt(s - 1) : 0n;
+  const sa = 2 ** Math.ceil((s - e) / 2), sb = 2 ** Math.floor((s - e) / 2);
+  const toDouble = (m) => {
+    if (!s) return Number(m) * sa * sb;
+    const x = Number((m + half) >> S);
+    return Math.abs(x) < 2 ** 64 ? bigToDouble({ m, e }) : x * sa * sb;
+  };
+  while (!period && len <= iters) {
+    // (zx + zy)(zx - zy) is exactly zx^2 - zy^2 with one multiply fewer.
+    const nx = (((zx + zy) * (zx - zy)) >> E) + cx;
     zy = ((zx * zy) >> E1) + cy;
     zx = nx;
-    const r = bigToDouble({ m: zx, e }), i = bigToDouble({ m: zy, e });
+    const r = toDouble(zx), i = toDouble(zy);
     data[2 * len] = r;
     data[2 * len + 1] = i;
+    if (r * r + i * i > 4) { len++; ref.escaped = true; break; }
+    if (zx === sx && zy === sy) period = len - mark;
+    else if (len === 2 * mark || mark === 0) { sx = zx; sy = zy; mark = len; }
     len++;
-    if (r * r + i * i > 4) { ref.escaped = true; break; }
   }
-  Object.assign(ref, { zx, zy, len, data });
+  if (period) {
+    for (let k = 2 * len, end = 2 * (iters + 1); k < end; k++) data[k] = data[k - 2 * period];
+    len = Math.max(len, iters + 1);
+  }
+  Object.assign(ref, { zx, zy, len, data, period, sx, sy, mark });
 }
 
 const bigNeg = (a) => ({ m: -a.m, e: a.e });
@@ -309,12 +337,19 @@ const bigSub = (a, b) => bigAdd(a, bigNeg(b));
 const refWorker = (() => {
   let worker = null, nextId = 0, broken = false;
   const pending = new Map();
+  // The last orbit is kept and extended when the same center comes back with
+  // a higher limit (the GPU renderer doubles its limit as a final image
+  // settles), instead of starting over. The reply is cut to what a fresh
+  // orbit of `iters` would be, so a longer cached one changes nothing.
+  let last = null;
   const local = (cx, cy, e, iters) => {
-    const ref = makeReference({ m: cx, e }, { m: cy, e });
+    if (!last || last.cx !== cx || last.cy !== cy || last.e !== e) last = makeReference({ m: cx, e }, { m: cy, e });
+    const ref = last;
     extendReference(ref, iters);
-    return { cx, cy, e, len: ref.len, escaped: ref.escaped, data: ref.data.slice(0, 2 * ref.len) };
+    const len = Math.min(ref.len, iters + 1);
+    return { cx, cy, e, len, escaped: ref.escaped && len === ref.len, data: ref.data.slice(0, 2 * len) };
   };
-  const SRC = `${shr}\n${bigToDouble}\n${makeReference}\n${extendReference}\nconst local = ${local};
+  const SRC = `${shr}\n${bigToDouble}\n${makeReference}\n${extendReference}\nlet last = null;\nconst local = ${local};
 onmessage = (msg) => {
   const { id, cx, cy, e, iters } = msg.data;
   const out = local(cx, cy, e, iters);
