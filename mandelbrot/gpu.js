@@ -546,8 +546,8 @@ void main() {
     }
     const trapValues = sorted(samples, "trap");
     // Flat orbit trap: switch to escape time (before equalizing the trap
-    // values, which would then go unused).
-    if (colorMode === "auto" && trapValues.length >= 50 && repeatShare(trapValues) > 0.05) {
+    // values, which would then go unused). See trapIsFlat in core.js.
+    if (colorMode === "auto" && trapIsFlat(trapValues, repeatShare(trapValues))) {
       const r = escape();
       if (r) return r;
     }
@@ -674,6 +674,12 @@ void main() {
   }
 
   function pass(j, base, end) {
+    // Invariant (see service()): a pass never runs off the end of a reference
+    // that hasn't escaped; rebasing there loses float32 precision and glitches
+    // the image. Logged loudly so tests/browser.test.js fails on it.
+    if (!j.ref.escaped && end > j.ref.len - 2) {
+      console.error(`gpu: pass to ${end} runs past the reference (len ${j.ref.len})`);
+    }
     const fe = j.variant === "fe";
     const P = use(fe ? progs.fe : progs.f32);
     gl.bindFramebuffer(gl.FRAMEBUFFER, T.sf[1 - cur]);

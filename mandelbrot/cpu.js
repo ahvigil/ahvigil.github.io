@@ -176,11 +176,8 @@ onmessage = (e) => {
   // values bunch up. Otherwise it reproduces mb.py's (value + 1) / max_color.
   // lo/hi (1st-98th percentile) are kept for the max_color shown and copied.
   //
-  // Deep in, the orbit trap stops working: it's set within the first few
-  // iterations, where neighboring pixels' orbits are identical in doubles, so
-  // many pixels get exactly the same value. When repeats show up on screen
-  // (normal views have essentially none), switch to (equalized) smooth escape
-  // time, which doesn't.
+  // Deep in, the orbit trap stops working (trapIsFlat in core.js); then
+  // switch to (equalized) smooth escape time, which keeps varying.
   async function colorRange(run, width, height, iters, maxColor) {
     // values: Float64Array of escaped samples (its numeric sort beats Array's).
     const equalize = (values) => {
@@ -202,8 +199,8 @@ onmessage = (e) => {
     }
     const samples = (await sampleView(run, width, height, iters, 20000)).filter((v) => v);
     const repeats = 1 - new Set(samples).size / samples.length;
-    const trap = equalize(samples);
-    if (colorMode === "auto" && trap && repeats > 0.05) {
+    const trap = equalize(samples);  // sorts samples
+    if (colorMode === "auto" && trap && trapIsFlat(samples, repeats)) {
       const r = await escape();
       if (r) return r;
     }

@@ -318,6 +318,20 @@ function orbitValues(g, ref, out) {
   return out;
 }
 
+// Whether orbit-trap coloring has gone flat, given the on-screen trap values
+// (sorted) and the share of them that repeat exactly. Deep in, it fails two
+// ways: the trap is set within the first few iterations, where neighboring
+// pixels' orbits are identical in doubles, so many pixels get the same value
+// (repeats; normal views have essentially none); or every orbit passes
+// within about 0.007 of 0, so all values land within a unit or two of each
+// other and the screen becomes one smooth glow (deep minibrots). Auto
+// coloring switches to escape time then, which keeps varying.
+function trapIsFlat(sorted, repeats) {
+  const n = sorted.length;
+  if (n < 50) return false;
+  return repeats > 0.05 || sorted[Math.floor(n * 0.98)] - sorted[Math.floor(n * 0.01)] < 2;
+}
+
 // Renders a band of rows to RGBA, mapping values in [lo, hi] across the
 // palette. Shipped to the workers via toString() along with orbitValues, so
 // it must not reference anything else. In high-resolution jobs (job.hd),
@@ -565,7 +579,7 @@ onmessage = (msg) => {
 
 if (typeof module !== "undefined") {
   module.exports = {
-    LOCATIONS, PALETTES, PALETTE_NAMES, LUT_SIZE, buildLut, orbitValue, perturbValue, orbitValues,
+    LOCATIONS, PALETTES, PALETTE_NAMES, LUT_SIZE, buildLut, orbitValue, perturbValue, orbitValues, trapIsFlat,
     renderBand,
     shr, rescale, bigAdd, bigNeg, bigSub, bigFromDouble, bigFromString, bigToDouble, bigToString,
     precisionFor, makeReference, extendReference, refWorker,
