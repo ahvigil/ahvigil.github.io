@@ -98,7 +98,8 @@ Press `s` or the ⚙ button. Changes apply right away.
   *bands* and *log cycles* keep more contrast in the center of deep
   minibrots, which equal area can wash out.
 - **Auto color range**: stretch the colors to what is on screen.
-- **Palette**: ultra, fire, ice, neon, mono or terminal.
+- **Palette**: ultra, fire, ice, neon, mono, sunset, forest, copper, aurora,
+  spectrum or terminal. Spectrum sweeps through every hue.
 
 **Animation**
 - **Camera speed**: slow, relaxed (the default), brisk or fast.
@@ -123,7 +124,7 @@ aren't valid are ignored.
 | `hold=SECONDS` | Time at each stop (default 5) |
 | `speed=slow\|relaxed\|brisk\|fast` | Camera speed |
 | `dive=0` | Cut between stops instead of diving |
-| `palette=NAME` | ultra, fire, ice, neon, mono, terminal |
+| `palette=NAME` | ultra, fire, ice, neon, mono, sunset, forest, copper, aurora, spectrum, terminal |
 | `color=auto\|trap\|escape` | Coloring |
 | `map=equal\|blend\|bands\|cycles` | Escape-time mapping |
 | `auto=0` | Fixed color range |
