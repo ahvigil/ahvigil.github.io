@@ -457,7 +457,7 @@ void main() {
     const o = refOffset(ref, t);
     if (Math.max(Math.abs(o.x), Math.abs(o.y)) > 2 * spanOf(t)) return true;
     if (j.final && !refCentered(ref, t)) return true;
-    if (!ref.escaped && ref.len <= j.limit) return true;
+    if (!ref.escaped && ref.len < j.limit + 2) return true;  // see service(): iterating needs len >= limit + 2
     return false;
   }
 
@@ -467,7 +467,7 @@ void main() {
     const bits = precisionFor(stepOf(t));
     const c = { x: rescale(t.center.x, bits), y: rescale(t.center.y, bits) };
     const id = inflight = ++reqId;
-    refWorker.request(c, j.limit).then((r) => {
+    refWorker.request(c, j.limit + 1).then((r) => {
       if (id !== reqId || !available) return;
       inflight = 0;
       onRef(r);
@@ -867,6 +867,20 @@ void main() {
     j.age++;
     let worked = false;
     if (j.stage === "waitref") tryBegin(j);
+    // Never iterate past the end of a reference that hasn't escaped. A pixel
+    // that runs off the end is rebased onto the start with dz = z while z is
+    // still O(1), and in float32 that rounds away the ~1e-13 differences
+    // between neighboring pixels: whole regions collapse onto one orbit
+    // (straight-edged glitches in deep minibrots). When a job outgrows its
+    // reference (a final growing its limit), wait for the longer one, which
+    // ensureRef has asked for; the swap in onRef then carries on exactly.
+    // (The shader rebases once m reaches len - 1, and m <= i + 1 in pass i.)
+    const refEnd = j.stage === "iter" && !j.ref.escaped ? Math.min(j.limit, j.ref.len - 2) : j.limit;
+    if (j.stage === "iter" && j.iterDone >= refEnd && refEnd < j.limit) {
+      ensureRef(j);
+      j.frames++;
+      return false;
+    }
     if (j.stage === "iter") {
       const px = j.w * j.h;
       const ms = j.final && settled ? SETTLED_MS : TARGET_MS;
@@ -876,8 +890,8 @@ void main() {
       const size = Math.min(ipf, PASS_MAX);
       let done = 0;
       const q = beginTimer();
-      while (done < ipf && j.iterDone < j.limit) {
-        const n = Math.min(size, j.limit - j.iterDone);
+      while (done < ipf && j.iterDone < refEnd) {
+        const n = Math.min(size, refEnd - j.iterDone);
         pass(j, j.iterDone, j.iterDone + n);
         j.iterDone += n;
         done += n;
