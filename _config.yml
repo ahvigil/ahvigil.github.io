@@ -1,1 +1,1 @@
-exclude: ["Gemfile", "Gemfile.lock", "node_modules", "vendor", "docs"]
+exclude: ["Gemfile", "Gemfile.lock", "node_modules", "vendor", "docs", "tests", "package.json"]
