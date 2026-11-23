@@ -34,7 +34,8 @@
     border-radius: 3px;
     font: 12px ui-monospace, Menlo, Consolas, monospace;
     white-space: pre-wrap;
-    max-width: calc(100vw - 24px);
+    /* Leaves room for the button bar at the bottom left (4 buttons). */
+    max-width: calc(100vw - 230px);
     box-sizing: border-box;
     opacity: 0;
     transition: opacity 0.6s;
@@ -43,7 +44,7 @@
   #hud.show { opacity: 1; transition: none; }
   /* Narrow screens: the tour buttons take the bottom edge. */
   @media (max-width: 640px) {
-    #hud { top: 10px; bottom: auto; left: 12px; right: 12px; }
+    #hud { top: 10px; bottom: auto; left: 12px; right: 12px; max-width: none; }
   }
   @media (prefers-reduced-motion: reduce) { #hud { transition: none; } }
   .sr-only {
