@@ -245,7 +245,9 @@ const camera = (() => {
     }
     const moving = !!run || pointers.size > 0 || now < wheelUntil;
     if (moving) {
-      if (api.cam !== lastDraft && api.target) {
+      // Click zoom-ins skip drafts: the current image, stretched, already
+      // covers the screen (see startAnim).
+      if (api.cam !== lastDraft && api.target && !(run && !run.drafts)) {
         lastDraft = api.cam;
         renderer.setTarget({ center: api.cam.center, distance: api.cam.distance, maxColor: api.target.maxColor, final: false });
       }
@@ -277,6 +279,10 @@ const camera = (() => {
       dur,
       at: how === "dive" ? diveAnim(from, t) : zoomAnim(from, t),
       end: t,
+      // Zooming in only magnifies what's on screen, so reprojecting the last
+      // image is the preview. Draft renders there would use the base
+      // iteration count, which can paint slow-escaping filaments black.
+      drafts: how === "dive" || t.distance >= from.distance,
     };
     needFinal = true;
     awaiting = false;
