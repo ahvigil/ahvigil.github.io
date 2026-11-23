@@ -207,8 +207,8 @@ void main() {
 
   const FS_COLOR = `${HEAD}
 uniform sampler2D uS1, uS2, uLut, uQ;
-uniform int uSmooth, uHasQ, uComplete, uTop;
-uniform float uLo, uHi;
+uniform int uSmooth, uHasQ, uComplete, uTop, uMap;
+uniform float uLo, uHi, uLogLo, uLogHi;
 out vec4 o;
 // Quantiles and trap values are (float, float) pairs: the orbit trap differs
 // between pixels far below float32 resolution at deep zooms.
@@ -241,6 +241,14 @@ void main() {
     rank = clamp((v - uLo) / max(uHi - uLo, 1e-9), 0.0, 1.0);
   }
   float sv = uSmooth == 1 ? rank : 1.0 - rank;
+  // Color mapping for escape time (core.js mapEscape; keep the two in step).
+  if (uSmooth == 1 && uMap == 1) {
+    float l = clamp((log(s.y) - uLogLo) / max(uLogHi - uLogLo, 1e-9), 0.0, 1.0);
+    sv = 0.5 * rank + 0.5 * sqrt(l);
+  } else if (uSmooth == 1 && (uMap == 2 || uMap == 3)) {
+    float x = mod(uMap == 2 ? rank * 3.0 : log(s.y) * 6.0, 2.0);
+    sv = x > 1.0 ? 2.0 - x : x;
+  }
   int li = int(floor(sv * float(uTop) + 0.5));
   o = vec4(texelFetch(uLut, ivec2(li, 0), 0).rgb, 1.0);
 }`;
@@ -582,6 +590,9 @@ void main() {
     bindTex(3, T.s2[cur]);
     u1i(P, "uS1", 0); u1i(P, "uLut", 1); u1i(P, "uQ", 2); u1i(P, "uS2", 3);
     u1i(P, "uSmooth", range.smooth ? 1 : 0);
+    u1i(P, "uMap", Math.max(0, COLOR_MAPS.indexOf(colorMap)));
+    u1f(P, "uLogLo", Math.log(Math.max(range.lo, 1e-9)));
+    u1f(P, "uLogHi", Math.log(Math.max(range.quantiles ? range.quantiles[256] : range.hi, 1e-9)));
     u1i(P, "uHasQ", range.quantiles ? 1 : 0);
     u1i(P, "uComplete", complete ? 1 : 0);
     u1i(P, "uTop", lutSize - 1);

@@ -96,7 +96,7 @@
  *
  * URL parameters: ?location=N ?iterations=N ?hold=SECONDS ?once
  *                 ?at=X,Y,DISTANCE[,MAX_COLOR] ?palette=NAME ?auto=0 ?hd=1
- *                 ?color=auto|trap|escape
+ *                 ?color=auto|trap|escape ?map=equal|blend|bands|cycles
  */
 /*
  * Code layout. Classic scripts share one global scope; each file defines one
@@ -214,6 +214,10 @@ let rendered = false;
 let autoRange = params.get("auto") !== "0";  // stretch colors to what's on screen
 const COLOR_MODES = ["auto", "trap", "escape"];  // orbit trap, escape time, or pick
 let colorMode = COLOR_MODES.includes(params.get("color")) ? params.get("color") : "auto";
+// How escape times map onto the palette: equal area (histogram equalized),
+// a blend with a log scale, ping-pong bands, or log cycles (see renderBand).
+const COLOR_MAPS = ["equal", "blend", "bands", "cycles"];
+let colorMap = [params.get("map"), stored("mb-colormap")].find((m) => COLOR_MAPS.includes(m)) || "equal";
 // Camera speed (e-folds per second at peak, see camera.js) and the minimum
 // click-zoom and dive durations it may stretch.
 let anim = { clickMs: 500, dive: true, diveMs: 4000, speed: 2 };
@@ -261,6 +265,7 @@ function setRenderer(pref) {
 
 function setHiRes(on) { hiRes = on; rerender(); }
 function setColorMode(m) { colorMode = m; rerender(); }
+function setColorMap(m) { colorMap = m; store("mb-colormap", m); rerender(); }
 function cycleColorMode() { setColorMode(COLOR_MODES[(COLOR_MODES.indexOf(colorMode) + 1) % COLOR_MODES.length]); }
 function setAutoRange(on) { autoRange = on; rerender(); }
 function setPalette(name) {
@@ -311,7 +316,7 @@ function coords() {
 function colorInfo() {
   const { range } = renderer.status();
   const coloring = range && range.smooth
-    ? "escape time" : `orbit trap (${autoRange ? "auto" : "fixed"} range)`;
+    ? `escape time (${colorMap})` : `orbit trap (${autoRange ? "auto" : "fixed"} range)`;
   const precision = renderer.name === "gpu" ? "gpu" : hiRes ? "hi-res" : "lo-res";
   return `${palette}, ${colorMode} color: ${coloring}, ${precision}`;
 }
@@ -377,6 +382,7 @@ function saveState() {
   if (hiRes) q.set("hd", "1"); else q.delete("hd");
   if (autoRange) q.delete("auto"); else q.set("auto", "0");
   if (colorMode === "auto") q.delete("color"); else q.set("color", colorMode);
+  if (q.has("map")) q.set("map", colorMap);
   if (!once) q.delete("once");
   if (q.has("palette")) q.set("palette", palette);
   const text = q.toString().replace(/%2C/g, ",");

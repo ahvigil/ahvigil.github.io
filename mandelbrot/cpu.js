@@ -249,7 +249,8 @@ onmessage = (e) => {
       syncReference(run, iters);
       const msgs = [];
       for (let y0 = 0; y0 < height; y0 += BAND_ROWS) {
-        msgs.push({ job: { width, y0, rows: Math.min(BAND_ROWS, height - y0), ...geo, iterations: iters, ...range } });
+        msgs.push({ job: { width, y0, rows: Math.min(BAND_ROWS, height - y0), ...geo, iterations: iters, ...range,
+                           map: Math.max(0, COLOR_MAPS.indexOf(colorMap)) } });
       }
 
       if (!back || back.canvas.width !== width || back.canvas.height !== height) back = makeLayer(width, height);

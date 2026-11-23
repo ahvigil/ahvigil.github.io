@@ -340,7 +340,7 @@ function trapIsFlat(sorted, repeats) {
 // Orbit-trap values are brightest near the set (small values); smooth escape
 // times are brightest near the set too, but there that means large values.
 function renderBand(job, lut, ref, values) {
-  const { width, rows, lo, hi, quantiles, smooth } = job;
+  const { width, rows, lo, hi, quantiles, smooth, map = 0 } = job;
   const n = width * rows;
   if (!values || values.length < n) values = new Float64Array(n);
   orbitValues({ ...job, cols: width, x0: 0, stride: 1 }, ref, values);
@@ -348,6 +348,12 @@ function renderBand(job, lut, ref, values) {
   const out = new Uint8ClampedArray(n * 4);
   const top = lut.length / 3 - 1;
   const span = Math.max(hi - lo, 1e-9);
+  // Escape-time color mapping (COLOR_MAPS in index.html; gpu.js FS_COLOR
+  // does the same): 0 equal area, 1 blend of equal area and log scale,
+  // 2 equal area ping-ponged through the palette 1.5 times, 3 repeating
+  // bands by log of escape time.
+  const logLo = Math.log(Math.max(lo, 1e-9));
+  const logSpan = Math.max(Math.log(Math.max(quantiles ? quantiles[qn] : hi, 1e-9)) - logLo, 1e-9);
   for (let p = 0, o = 0; p < n; p++, o += 4) {
     out[o + 3] = 255;
     const value = values[p];
@@ -366,7 +372,13 @@ function renderBand(job, lut, ref, values) {
     } else {
       rank = Math.min(Math.max((value - lo) / span, 0), 1);
     }
-    const s = smooth ? rank : 1 - rank;
+    let s = smooth ? rank : 1 - rank;
+    if (smooth && map === 1) {
+      s = 0.5 * rank + 0.5 * Math.sqrt(Math.min(Math.max((Math.log(value) - logLo) / logSpan, 0), 1));
+    } else if (smooth && (map === 2 || map === 3)) {
+      const x = (map === 2 ? rank * 3 : Math.log(value) * 6) % 2;
+      s = x > 1 ? 2 - x : x;
+    }
     const li = Math.round(s * top) * 3;
     out[o] = lut[li];
     out[o + 1] = lut[li + 1];

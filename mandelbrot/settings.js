@@ -106,6 +106,7 @@ const settings = (() => {
     els.hiresNote.textContent = gpuActive ? "GPU always uses perturbation" : "";
     els.hiresNote.hidden = !gpuActive;
     els.color.value = colorMode;
+    els.map.value = colorMap;
     els.auto.checked = !!autoRange;
     els.palette.value = palette;
     els.iter.value = String(iterationScale);
@@ -162,6 +163,7 @@ const settings = (() => {
         row("iter", "Iterations", select(iterOpts))),
       group("Color",
         row("color", "Coloring", select([["auto", "auto"], ["trap", "orbit trap"], ["escape", "escape time"]])),
+        row("map", "Escape-time mapping", select([["equal", "equal area"], ["blend", "blend"], ["bands", "bands"], ["cycles", "log cycles"]])),
         row("auto", "Auto color range", checkbox()),
         row("palette", "Palette", select(palOpts))),
       group("Animation",
@@ -219,6 +221,7 @@ const settings = (() => {
     els.renderer.addEventListener("change", changed(() => setRenderer(els.renderer.value)));
     els.hires.addEventListener("change", changed(() => setHiRes(els.hires.value === "1")));
     els.color.addEventListener("change", changed(() => setColorMode(els.color.value)));
+    els.map.addEventListener("change", changed(() => setColorMap(els.map.value)));
     els.auto.addEventListener("change", changed(() => setAutoRange(els.auto.checked)));
     els.palette.addEventListener("change", changed(() => setPalette(els.palette.value)));
     els.iter.addEventListener("change", changed(() => setIterationScale(Number(els.iter.value))));
