@@ -118,16 +118,24 @@ function orbitValue(cr, ci, iterations, smooth) {
 // reference runs out (it escaped, or is shorter than needed), the orbit is
 // rebased onto the start of the reference: dz = z, m = 0. That keeps the
 // deltas accurate without any glitch detection.
+// The step is computed as dz' = (2 Z_m + dz) dz + dc, which is one rounding
+// step shorter on the dependency chain than expanding it.
+//
+// orbitValue and perturbValue are the one-pixel definitions; orbitValues
+// below computes exactly the same numbers for a grid of pixels, faster.
 function perturbValue(dcr, dci, ref, refLen, iterations, smooth) {
   let dzr = 0, dzi = 0, m = 0, mind2 = 4;
+  let Zr = 0, Zi = 0;  // Z_m, carried over from the previous step's Z_{m+1}
   const bailout = smooth ? 1e6 : 4;
   for (let i = 0; i < iterations; i++) {
-    const Zr = ref[2 * m], Zi = ref[2 * m + 1];
-    const t = 2 * (Zr * dzr - Zi * dzi) + dzr * dzr - dzi * dzi + dcr;
-    dzi = 2 * (Zr * dzi + Zi * dzr + dzr * dzi) + dci;
+    const ar = 2 * Zr + dzr, ai = 2 * Zi + dzi;
+    const t = ar * dzr - ai * dzi + dcr;
+    dzi = ar * dzi + ai * dzr + dci;
     dzr = t;
     m++;
-    const zr = ref[2 * m] + dzr, zi = ref[2 * m + 1] + dzi;
+    Zr = ref[2 * m];
+    Zi = ref[2 * m + 1];
+    const zr = Zr + dzr, zi = Zi + dzi;
     const d2 = zr * zr + zi * zi;
     if (d2 >= bailout) {
       return smooth ? i + 5 - Math.log2(Math.log2(d2) / 2)
@@ -135,54 +143,220 @@ function perturbValue(dcr, dci, ref, refLen, iterations, smooth) {
     }
     if (d2 < mind2) mind2 = d2;
     if (d2 < dzr * dzr + dzi * dzi || m === refLen - 1) {
-      dzr = zr; dzi = zi; m = 0;
+      dzr = zr; dzi = zi; m = 0; Zr = 0; Zi = 0;
     }
   }
   return 0;
 }
 
+// orbitValue / perturbValue for a grid of pixels, into out (row-major). The
+// point in row r, column k is pixel (x0 + k * stride, y0 + r * stride) of a
+// view whose pixel (px, py) is c = (xmin + px * step, ymin + py * step); in
+// high-resolution grids (g.hd) that c is an offset from the center of the
+// reference orbit `ref`.
+//
+// Each step of one orbit waits on the previous one, so a single orbit leaves
+// most of the CPU's floating-point units idle. Iterating two pixels together
+// (lanes a and b, each refilled with the next pixel as soon as its orbit
+// ends) runs about 1.7x as many iterations per second. The arithmetic per
+// lane is exactly orbitValue's (low resolution) or perturbValue's.
+//
+// Points in the main cardioid and period-2 bulb are skipped, as orbitValue
+// does. Hi-res grids opt in with g.bulbs and the center (g.cx, g.cy) as
+// doubles, which is only accurate where doubles still resolve pixels.
+// Shipped to the workers via toString(), so it must not reference anything
+// else.
+function orbitValues(g, ref, out) {
+  const { cols, rows, x0, y0, stride, xmin, ymin, step, iterations, smooth, hd } = g;
+  const bulbs = !hd || g.bulbs;
+  const cx = hd ? g.cx : 0, cy = hd ? g.cy : 0;
+  const bailout = smooth ? 1e6 : 4;
+  const n = cols * rows;
+  // Pixels left to iterate, in order (the bulbs' insides are 0 already).
+  const todo = new Int32Array(n);
+  let count = 0;
+  for (let p = 0; p < n; p++) {
+    if (bulbs) {
+      const cr = cx + (xmin + (x0 + (p % cols) * stride) * step);
+      const ci = cy + (ymin + (y0 + Math.floor(p / cols) * stride) * step), ci2 = ci * ci;
+      const q = (cr - 0.25) * (cr - 0.25) + ci2;
+      if (q * (q + (cr - 0.25)) <= 0.25 * ci2 || (cr + 1) * (cr + 1) + ci2 <= 0.0625) { out[p] = 0; continue; }
+    }
+    todo[count++] = p;
+  }
+  if (!count) return out;
+  // Lane state: pixel p (-1 once there are none left: the lane then idles
+  // on c = 0 until the other one finishes), c, iteration i, closest
+  // approach min, and |z|^2 at the last step. The hot loops run until
+  // either lane ends; refilling lanes stays outside them, which keeps V8's
+  // code for the loops tight (with it inside, they ran no faster than one
+  // pixel at a time). No helper closures either: a fresh closure per call
+  // makes V8 deoptimize.
+  let next = 0;
+  let pa = todo[next++], pb = next < count ? todo[next++] : -1;
+  let acr = xmin + (x0 + (pa % cols) * stride) * step, aci = ymin + (y0 + Math.floor(pa / cols) * stride) * step;
+  let bcr = pb < 0 ? 0 : xmin + (x0 + (pb % cols) * stride) * step;
+  let bci = pb < 0 ? 0 : ymin + (y0 + Math.floor(pb / cols) * stride) * step;
+  let ai = 0, amin = 4, ad2 = 0, bi = 0, bmin = 4, bd2 = 0;
+  let aEnd = false, bEnd = false;
+  // z for low resolution; dz and Z_m for high resolution.
+  let azr = 0, azi = 0, bzr = 0, bzi = 0;
+  let aZr = 0, aZi = 0, am = 0, bZr = 0, bZi = 0, bm = 0;
+  const last = hd ? (ref.length >> 1) - 1 : 0;  // rebase when m reaches the end of ref
+  // Low and high resolution get separate loops, refills included: sharing
+  // one costs high resolution about 20%.
+  if (!hd) {
+    // orbitValue's loop, two lanes.
+    for (;;) {
+      for (;;) {
+        const at = azr * azr - azi * azi + acr;
+        const bt = bzr * bzr - bzi * bzi + bcr;
+        azi = 2 * azr * azi + aci;
+        bzi = 2 * bzr * bzi + bci;
+        azr = at;
+        bzr = bt;
+        ad2 = azr * azr + azi * azi;
+        bd2 = bzr * bzr + bzi * bzi;
+        aEnd = ad2 >= bailout;
+        bEnd = bd2 >= bailout;
+        if (!aEnd) {
+          if (ad2 < amin) amin = ad2;
+          aEnd = ++ai === iterations;
+        }
+        if (!bEnd) {
+          if (bd2 < bmin) bmin = bd2;
+          bEnd = ++bi === iterations;
+        }
+        if (aEnd || bEnd) break;
+      }
+      if (aEnd) {
+        if (pa >= 0) {
+          out[pa] = ad2 < bailout ? 0 : smooth ? ai + 5 - Math.log2(Math.log2(ad2) / 2)
+                                               : Math.min(Math.sqrt(amin) / 0.007, 254) + 1;
+        }
+        pa = next < count ? todo[next++] : -1;
+        if (pa < 0 && pb < 0) break;
+        acr = pa < 0 ? 0 : xmin + (x0 + (pa % cols) * stride) * step;
+        aci = pa < 0 ? 0 : ymin + (y0 + Math.floor(pa / cols) * stride) * step;
+        azr = 0; azi = 0; ai = 0; amin = 4;
+      }
+      if (bEnd) {
+        if (pb >= 0) {
+          out[pb] = bd2 < bailout ? 0 : smooth ? bi + 5 - Math.log2(Math.log2(bd2) / 2)
+                                               : Math.min(Math.sqrt(bmin) / 0.007, 254) + 1;
+        }
+        pb = next < count ? todo[next++] : -1;
+        if (pa < 0 && pb < 0) break;
+        bcr = pb < 0 ? 0 : xmin + (x0 + (pb % cols) * stride) * step;
+        bci = pb < 0 ? 0 : ymin + (y0 + Math.floor(pb / cols) * stride) * step;
+        bzr = 0; bzi = 0; bi = 0; bmin = 4;
+      }
+    }
+    return out;
+  }
+  // perturbValue's loop, two lanes (azr, azi hold dz).
+  for (;;) {
+    for (;;) {
+      const a2r = 2 * aZr + azr, a2i = 2 * aZi + azi;
+      const b2r = 2 * bZr + bzr, b2i = 2 * bZi + bzi;
+      const at = a2r * azr - a2i * azi + acr;
+      const bt = b2r * bzr - b2i * bzi + bcr;
+      azi = a2r * azi + a2i * azr + aci;
+      bzi = b2r * bzi + b2i * bzr + bci;
+      azr = at;
+      bzr = bt;
+      am++;
+      bm++;
+      aZr = ref[2 * am];
+      aZi = ref[2 * am + 1];
+      bZr = ref[2 * bm];
+      bZi = ref[2 * bm + 1];
+      const zar = aZr + azr, zai = aZi + azi, zbr = bZr + bzr, zbi = bZi + bzi;
+      ad2 = zar * zar + zai * zai;
+      bd2 = zbr * zbr + zbi * zbi;
+      aEnd = ad2 >= bailout;
+      bEnd = bd2 >= bailout;
+      if (!aEnd) {
+        if (ad2 < amin) amin = ad2;
+        if (ad2 < azr * azr + azi * azi || am === last) {
+          azr = zar; azi = zai; am = 0; aZr = 0; aZi = 0;
+        }
+        aEnd = ++ai === iterations;
+      }
+      if (!bEnd) {
+        if (bd2 < bmin) bmin = bd2;
+        if (bd2 < bzr * bzr + bzi * bzi || bm === last) {
+          bzr = zbr; bzi = zbi; bm = 0; bZr = 0; bZi = 0;
+        }
+        bEnd = ++bi === iterations;
+      }
+      if (aEnd || bEnd) break;
+    }
+    if (aEnd) {
+      if (pa >= 0) {
+        out[pa] = ad2 < bailout ? 0 : smooth ? ai + 5 - Math.log2(Math.log2(ad2) / 2)
+                                             : Math.min(Math.sqrt(amin) / 0.007, 254) + 1;
+      }
+      pa = next < count ? todo[next++] : -1;
+      if (pa < 0 && pb < 0) break;
+      acr = pa < 0 ? 0 : xmin + (x0 + (pa % cols) * stride) * step;
+      aci = pa < 0 ? 0 : ymin + (y0 + Math.floor(pa / cols) * stride) * step;
+      azr = 0; azi = 0; aZr = 0; aZi = 0; am = 0; ai = 0; amin = 4;
+    }
+    if (bEnd) {
+      if (pb >= 0) {
+        out[pb] = bd2 < bailout ? 0 : smooth ? bi + 5 - Math.log2(Math.log2(bd2) / 2)
+                                             : Math.min(Math.sqrt(bmin) / 0.007, 254) + 1;
+      }
+      pb = next < count ? todo[next++] : -1;
+      if (pa < 0 && pb < 0) break;
+      bcr = pb < 0 ? 0 : xmin + (x0 + (pb % cols) * stride) * step;
+      bci = pb < 0 ? 0 : ymin + (y0 + Math.floor(pb / cols) * stride) * step;
+      bzr = 0; bzi = 0; bZr = 0; bZi = 0; bm = 0; bi = 0; bmin = 4;
+    }
+  }
+  return out;
+}
+
 // Renders a band of rows to RGBA, mapping values in [lo, hi] across the
-// palette. Shipped to the workers via toString() along with orbitValue and
-// perturbValue, so it must not reference anything else. In high-resolution
-// jobs (job.hd), xmin/ymin are offsets from the reference orbit's center.
+// palette. Shipped to the workers via toString() along with orbitValues, so
+// it must not reference anything else. In high-resolution jobs (job.hd),
+// xmin/ymin are offsets from the reference orbit's center. `values` is an
+// optional Float64Array to reuse (at least width * rows long).
 // Orbit-trap values are brightest near the set (small values); smooth escape
 // times are brightest near the set too, but there that means large values.
-function renderBand(job, lut, ref) {
-  const { width, y0, rows, xmin, ymin, step, iterations, lo, hi, quantiles, hd, smooth } = job;
-  const refLen = ref ? ref.length >> 1 : 0;
+function renderBand(job, lut, ref, values) {
+  const { width, rows, lo, hi, quantiles, smooth } = job;
+  const n = width * rows;
+  if (!values || values.length < n) values = new Float64Array(n);
+  orbitValues({ ...job, cols: width, x0: 0, stride: 1 }, ref, values);
   const qn = quantiles ? quantiles.length - 1 : 0;
-  const out = new Uint8ClampedArray(width * rows * 4);
+  const out = new Uint8ClampedArray(n * 4);
   const top = lut.length / 3 - 1;
   const span = Math.max(hi - lo, 1e-9);
-  let o = 0;
-  for (let r = 0; r < rows; r++) {
-    const ci = ymin + (y0 + r) * step;
-    for (let ix = 0; ix < width; ix++, o += 4) {
-      out[o + 3] = 255;
-      const value = hd
-        ? perturbValue(xmin + ix * step, ci, ref, refLen, iterations, smooth)
-        : orbitValue(xmin + ix * step, ci, iterations, smooth);
-      if (value === 0) continue;  // inside the set: black
-      let rank;
-      if (quantiles) {
-        // Histogram equalization: rank of this value among on-screen samples.
-        let a = 0, b = qn;
-        if (value <= quantiles[0]) rank = 0;
-        else if (value >= quantiles[qn]) rank = 1;
-        else {
-          while (b - a > 1) { const m = (a + b) >> 1; if (quantiles[m] <= value) a = m; else b = m; }
-          const gap = quantiles[b] - quantiles[a];
-          rank = (a + (gap > 0 ? (value - quantiles[a]) / gap : 0)) / qn;
-        }
-      } else {
-        rank = Math.min(Math.max((value - lo) / span, 0), 1);
+  for (let p = 0, o = 0; p < n; p++, o += 4) {
+    out[o + 3] = 255;
+    const value = values[p];
+    if (value === 0) continue;  // inside the set: black
+    let rank;
+    if (quantiles) {
+      // Histogram equalization: rank of this value among on-screen samples.
+      let a = 0, b = qn;
+      if (value <= quantiles[0]) rank = 0;
+      else if (value >= quantiles[qn]) rank = 1;
+      else {
+        while (b - a > 1) { const m = (a + b) >> 1; if (quantiles[m] <= value) a = m; else b = m; }
+        const gap = quantiles[b] - quantiles[a];
+        rank = (a + (gap > 0 ? (value - quantiles[a]) / gap : 0)) / qn;
       }
-      const s = smooth ? rank : 1 - rank;
-      const li = Math.round(s * top) * 3;
-      out[o] = lut[li];
-      out[o + 1] = lut[li + 1];
-      out[o + 2] = lut[li + 2];
+    } else {
+      rank = Math.min(Math.max((value - lo) / span, 0), 1);
     }
+    const s = smooth ? rank : 1 - rank;
+    const li = Math.round(s * top) * 3;
+    out[o] = lut[li];
+    out[o + 1] = lut[li + 1];
+    out[o + 2] = lut[li + 2];
   }
   return out;
 }
@@ -391,7 +565,8 @@ onmessage = (msg) => {
 
 if (typeof module !== "undefined") {
   module.exports = {
-    LOCATIONS, PALETTES, PALETTE_NAMES, LUT_SIZE, buildLut, orbitValue, perturbValue, renderBand,
+    LOCATIONS, PALETTES, PALETTE_NAMES, LUT_SIZE, buildLut, orbitValue, perturbValue, orbitValues,
+    renderBand,
     shr, rescale, bigAdd, bigNeg, bigSub, bigFromDouble, bigFromString, bigToDouble, bigToString,
     precisionFor, makeReference, extendReference, refWorker,
   };

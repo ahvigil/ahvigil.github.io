@@ -102,7 +102,7 @@
  * Code layout. Classic scripts share one global scope; each file defines one
  * global object and touches nothing else at load time (everything starts
  * from init(), called at the bottom of this page):
- *   core.js      pure math, no DOM: LOCATIONS, palettes, orbitValue,
+ *   core.js      pure math, no DOM: LOCATIONS, palettes, orbitValue(s),
  *                perturbValue, renderBand, big numbers, reference orbits,
  *                refWorker (reference orbits off the main thread)
  *   cpu.js       cpuRenderer   gpu.js     gpuRenderer
