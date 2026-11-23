@@ -59,7 +59,8 @@
  * rendered per pixel on the GPU or in background workers, cycling through
  * the tour.
  *
- * Tour:     space = pause, n / right arrow = next, left arrow = previous,
+ * Tour:     stops play in random order, reshuffled each time round;
+ *           space = pause, n / right arrow = next, left arrow = previous,
  *           r = reset to the start of the built-in tour
  * Anywhere: p = next palette (remembered), a = toggle auto color range,
  *           h = toggle high-resolution (perturbation) mode,
@@ -168,7 +169,19 @@ if (at.length >= 3 && at.length <= 4 && at.every(Number.isFinite)) {
 }
 let n = locations.length;
 let iterations = Math.max(1, Math.floor(num("iterations", 500)));
-let current = ((Math.floor(num("location", 0)) % n) + n) % n;
+let current = ((Math.floor(num("location", 0)) % n) + n) % n;  // stop on screen (index into locations)
+// The tour visits the stops in random order: `order` is a shuffle of all
+// of them starting with `first`, reshuffled each time round; `pos` is the
+// position in it.
+function shuffled(first) {
+  const rest = [...Array(n).keys()].filter((i) => i !== first);
+  for (let i = rest.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [rest[i], rest[j]] = [rest[j], rest[i]];
+  }
+  return [first, ...rest];
+}
+let order = shuffled(current), pos = 0;
 let view = locations[current].slice();  // [x, y, distance, maxColor] of the target
 let center = centers[current];  // exact target center; view[0..1] round it to doubles
 let hiRes = params.get("hd") === "1";  // perturbation rendering (CPU renderer)
@@ -289,7 +302,7 @@ function updateHud(extra = "") {
             "[ ]: color range  - +: iterations  h: hi-res  o: coloring  c: copy  s: settings  r: reset  esc: back", true);
   } else {
     const distance = view[2];
-    showHud(`${current + 1}/${n}  ${fmt(center.x, distance)}, ${fmt(center.y, distance)}  distance ${distance}   ${colorInfo()}` +
+    showHud(`${pos + 1}/${n}  ${fmt(center.x, distance)}, ${fmt(center.y, distance)}  distance ${distance}   ${colorInfo()}` +
             `${paused ? "  (paused)" : ""}${extra}`, paused);
   }
 }
@@ -353,13 +366,18 @@ function resetTour() {
   paused = false;
   iterationScale = 1;
   current = 0;
+  order = shuffled(0);
+  pos = 0;
   go(0);
 }
 
 function go(delta) {
   const moving = delta !== 0 || mode === "explore";
   mode = "tour";
-  current = (((current + delta) % n) + n) % n;
+  pos += delta;
+  if (pos >= n) { order = shuffled(current); pos = n > 1 ? 1 : 0; }  // next round, new order
+  else if (pos < 0) pos = n - 1;
+  current = order[pos];
   center = centers[current];
   show(locations[current].slice(), moving && anim.dive && renderer.name === "gpu" ? "dive" : "jump");
   updateHud();
@@ -467,7 +485,7 @@ settings.init();
 setRenderer(rendererPref);
 resize();
 show(view);
-showHud(`${current + 1}/${n}   click: zoom in  space: pause  n: next  p: palette  a: auto color  h: hi-res  o: coloring  s: settings  r: reset`);
+showHud(`${pos + 1}/${n}   click: zoom in  space: pause  n: next  p: palette  a: auto color  h: hi-res  o: coloring  s: settings  r: reset`);
 </script>
 </body>
 </html>

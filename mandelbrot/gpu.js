@@ -34,6 +34,7 @@ const gpuRenderer = (() => {
   const STATS_SAMPLES = 16000;
   const ZERO_E = -1000000;       // exponent of a zero floatexp value
   const DRAFT_MAX_FRAMES = 8;
+  const DRAFT_BLEND = 0.4;       // share of the way each draft moves the colors
 
   const canvas = document.getElementById("gl");
 
@@ -527,6 +528,20 @@ void main() {
     return { lo: -1, hi: maxColor - 1, quantiles: null, smooth: false };
   }
 
+  // A step from range a toward b (both from colorRange), so colors follow the
+  // view gradually while the camera moves. Ranges of different kinds (orbit
+  // trap vs escape time, equalized vs fixed) can't be mixed: take b.
+  function blendRange(a, b, t) {
+    if (!a || a.smooth !== b.smooth || !a.quantiles !== !b.quantiles) return b;
+    const mix = (x, y) => x + (y - x) * t;
+    return {
+      lo: mix(a.lo, b.lo),
+      hi: mix(a.hi, b.hi),
+      quantiles: b.quantiles && b.quantiles.map((v, i) => mix(a.quantiles[i], v)),
+      smooth: b.smooth,
+    };
+  }
+
   function colorize(j, complete, ci, range = j.range || lastRange) {
     if (!range) return false;
     useRange(range);
@@ -752,6 +767,8 @@ void main() {
     }
     j.samples = samples;
     j.range = colorRange(samples, j.maxColor);
+    // Drafts move the colors part of the way toward what's on screen now.
+    if (!j.final) j.range = blendRange(lastRange, j.range, DRAFT_BLEND);
     const f = inside / n;
     if (j.final) {
       // Grow by resuming: probe one doubling, then keep doubling while the last
@@ -832,9 +849,9 @@ void main() {
       }
       j.frames++;
       worked = true;
+      // Every image, drafts too, measures its colors (see pollStats).
       if (j.iterDone >= j.limit) {
-        if (j.final || !lastRange) issueReduce(j);
-        else finish(j);
+        issueReduce(j);
       } else if (j.range || lastRange) {
         j.overlay = colorize(j, false, j.workCi, lastRange || j.range);
       }
