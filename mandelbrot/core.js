@@ -31,9 +31,14 @@ const LOCATIONS = [
   [-0.465086, 0.625207, 0.005, 45],   // deep zoom: knotted bands
   [-0.735379, 0.290928, 0.005, 42],   // deep zoom: seahorse valley wall
   [-1.050426, 0.262645, 0.005, 30],   // deep zoom: outskirts of the period-2 bulb
-  // HD only: needs continuous color and thousands of iterations, so it
-  // renders as a single glyph in mb.py.
-  [-1.7796274664, -0.0002364244, 0.000003052, 3],  // deep in the antenna: beaded minibrot
+  // HD only: these need continuous color and thousands of iterations, so
+  // they render as a single glyph in mb.py.
+  [-0.743643887037151, 0.131825904205330, 3e-9, 3],     // seahorse valley: spiral arm around a tiny minibrot
+  [-0.7746806106269039, 0.1374168856037867, 3e-9, 3],   // seahorse valley: S-shaped twin spiral
+  [-1.25066, 0.02012, 3e-4, 3],                         // period-2 neck: minibrot ringed by halos
+  [-1.7796274664, -0.0002364244, 0.000003052, 3],       // deep in the antenna: beaded minibrot
+  [-0.10109636384562, 0.95628651080914, 3e-9, 3],       // Misiurewicz point: branching dendrite
+  [0.001643721971153, 0.822467633298876, 3e-10, 3],     // spoked spiral around a minibrot
 ];
 
 const RAMP_STEPS = 80;

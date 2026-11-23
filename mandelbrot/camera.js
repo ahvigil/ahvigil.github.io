@@ -15,6 +15,10 @@
 const camera = (() => {
   const MAX_DISTANCE = 6.75 * 4;      // zoomed all the way out
   const DIVE_APEX = 6.75 * 2;         // highest a dive may climb
+  // Fastest a dive may go, in e-folds of zoom (or the equivalent pan) per
+  // second at the peak of the ease. Long dives (deep to deep) stretch past
+  // the configured duration to stay under it.
+  const DIVE_MAX_SPEED = 8;
   const WHEEL_SETTLE_MS = 150;
   const DRAG_PX = 4;
 
@@ -113,7 +117,19 @@ const camera = (() => {
       }
       path = wijkPath(n0, n1, nd, lo);
     }
-    return (u) => {
+    // Peak speed per unit of path time: e-folds of zoom combined with pans
+    // measured in view widths (a view is distance / 3 wide). The cubic ease
+    // peaks at 1.5x, so this sets the shortest duration under the cap.
+    let peak = 0;
+    for (let i = 0, prev = path.at(0); i < 256; i++) {
+      const next = path.at((i + 1) / 256);
+      const zoom = Math.log(next.w / prev.w);
+      const pan = (next.f - prev.f) * nd / ((next.w + prev.w) / 6);
+      peak = Math.max(peak, Math.hypot(zoom, pan) * 256);
+      prev = next;
+    }
+    const minMs = 1.5 * peak / DIVE_MAX_SPEED * 1000;
+    const at = (u) => {
       const { f, w } = path.at(ease(u));
       const distance = Math.min(Math.max(w * scale, Math.min(w0, w1) * 0.5), Math.max(DIVE_APEX, w0, w1));
       // Offsets from the nearer endpoint (by pan progress) keep both ends exact.
@@ -122,6 +138,7 @@ const camera = (() => {
         : offsetCenter(T, (f - 1) * dx, (f - 1) * dy, distance);
       return { center, distance };
     };
+    return { at, minMs };
   }
 
   // --- input --------------------------------------------------------------------
@@ -272,12 +289,13 @@ const camera = (() => {
 
   function startAnim(t, how) {
     const from = { center: api.cam.center, distance: api.cam.distance };
-    const dur = Math.max(1, how === "dive" ? anim.diveMs : anim.clickMs);
+    const dive = how === "dive" ? diveAnim(from, t) : null;
+    const dur = Math.max(1, dive ? Math.max(anim.diveMs, dive.minMs) : anim.clickMs);
     api.target = t;
     run = {
       t0: performance.now(),
       dur,
-      at: how === "dive" ? diveAnim(from, t) : zoomAnim(from, t),
+      at: dive ? dive.at : zoomAnim(from, t),
       end: t,
       // Zooming in only magnifies what's on screen, so reprojecting the last
       // image is the preview. Draft renders there would use the base
