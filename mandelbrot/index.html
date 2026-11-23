@@ -145,11 +145,18 @@ function store(key, value) {
 let palette = [params.get("palette"), stored("mb-palette")].find((p) => p in PALETTES) || "ultra";
 let LUT = buildLut(palette);
 
-let locations = LOCATIONS;
+// Tour stops as numbers; deep stops give x and y as decimal text, which
+// TOUR_CENTERS keeps exactly.
+const TOUR = LOCATIONS.map(([x, y, d, m]) => [Number(x), Number(y), d, m]);
+let locations = TOUR;
 let once = params.has("once");
 const atText = (params.get("at") || "").split(",");
 const at = atText.map(Number);
-const TOUR_CENTERS = LOCATIONS.map(([x, y]) => ({ x: bigFromDouble(x, 64), y: bigFromDouble(y, 64) }));
+const TOUR_CENTERS = LOCATIONS.map(([x, y, d]) => {
+  const bits = precisionFor(d / 3 / 8192);
+  const big = (v) => (typeof v === "string" ? bigFromString(v, bits) : bigFromDouble(v, bits));
+  return { x: big(x), y: big(y) };
+});
 let centers = TOUR_CENTERS;
 if (at.length >= 3 && at.length <= 4 && at.every(Number.isFinite)) {
   locations = [[at[0], at[1], at[2], at[3] || 256]];
@@ -281,8 +288,8 @@ function updateHud(extra = "") {
             "click: in  shift-click: out  wheel: zoom  drag: pan  p: palette  a: auto color\n" +
             "[ ]: color range  - +: iterations  h: hi-res  o: coloring  c: copy  s: settings  r: reset  esc: back", true);
   } else {
-    const [x, y, distance] = view;
-    showHud(`${current + 1}/${n}  ${x}, ${y}  distance ${distance}   ${colorInfo()}` +
+    const distance = view[2];
+    showHud(`${current + 1}/${n}  ${fmt(center.x, distance)}, ${fmt(center.y, distance)}  distance ${distance}   ${colorInfo()}` +
             `${paused ? "  (paused)" : ""}${extra}`, paused);
   }
 }
@@ -293,7 +300,7 @@ function saveState() {
   if (mode === "explore") {
     q.set("at", coords().split(" ").join(","));
     q.delete("location");
-  } else if (locations === LOCATIONS) {
+  } else if (locations === TOUR) {
     q.set("location", String(current));
     q.delete("at");
   }
@@ -339,9 +346,9 @@ function scheduleAdvance() {
 // view and ?once, unpauses, and resets the iteration multiplier. Palette and
 // coloring preferences stay.
 function resetTour() {
-  locations = LOCATIONS;
+  locations = TOUR;
   centers = TOUR_CENTERS;
-  n = LOCATIONS.length;
+  n = TOUR.length;
   once = false;
   paused = false;
   iterationScale = 1;

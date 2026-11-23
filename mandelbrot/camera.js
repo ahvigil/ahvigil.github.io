@@ -18,7 +18,7 @@ const camera = (() => {
   // Fastest a dive may go, in e-folds of zoom (or the equivalent pan) per
   // second at the peak of the ease. Long dives (deep to deep) stretch past
   // the configured duration to stay under it.
-  const DIVE_MAX_SPEED = 8;
+  const DIVE_MAX_SPEED = 6;
   const WHEEL_SETTLE_MS = 150;
   const DRAG_PX = 4;
 

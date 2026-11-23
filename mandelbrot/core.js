@@ -8,37 +8,20 @@
  * are shipped to workers via Function.prototype.toString().
  */
 
-// [x, y, distance, maxColor], same as mb.py. The view's horizontal span is
-// distance / 3, so framing matches the terminal version.
+// Tour stops: [x, y, distance, maxColor] (mb.py keeps its own list). The
+// view's horizontal span is distance / 3, so framing matches the terminal
+// version.
 const LOCATIONS = [
   [-0.5, 0.0, 6.75, 256],
-  [0.37865401, 0.669227668, 0.04, 111],
-  [-1.2693, -0.4145, 0.2, 105],
-  [-1.2693, -0.4145, 0.05, 97],
-  [-1.2642, -0.4185, 0.01, 95],
-  [-1.15, -0.28, 0.9, 94],
-  [-1.15, -0.28, 0.3, 58],
-  [-1.15, -0.28, 0.05, 26],
-  [-1.401155, 0.0, 0.2, 51],          // Feigenbaum point: period-doubling cascade
-  [-1.7685, 0.0, 0.2, 58],            // minibrot on the main antenna
-  [-0.1011, 0.9563, 0.04, 86],        // Misiurewicz point: spiraling filaments
-  [-0.660295, 0.438827, 0.1, 69],     // banded filaments off the main cardioid
-  [-1.234948, 0.164974, 0.02, 26],    // just outside the period-2 bulb
-  [-0.180977, 0.844923, 0.02, 36],    // edge of the period-3 bulb
-  [-0.558794, 0.627494, 0.1, 61],     // tendrils between the cardioid and top bulb
-  [0.393174, 0.370292, 0.02, 42],     // a bulb on the right edge of the cardioid
-  [0.149181, 0.655944, 0.02, 52],     // side bulb on the upper-right shoulder
-  [-0.465086, 0.625207, 0.005, 45],   // deep zoom: knotted bands
-  [-0.735379, 0.290928, 0.005, 42],   // deep zoom: seahorse valley wall
-  [-1.050426, 0.262645, 0.005, 30],   // deep zoom: outskirts of the period-2 bulb
-  // HD only: these need continuous color and thousands of iterations, so
-  // they render as a single glyph in mb.py.
-  [-0.743643887037151, 0.131825904205330, 3e-9, 3],     // seahorse valley: spiral arm around a tiny minibrot
-  [-0.7746806106269039, 0.1374168856037867, 3e-9, 3],   // seahorse valley: S-shaped twin spiral
-  [-1.25066, 0.02012, 3e-4, 3],                         // period-2 neck: minibrot ringed by halos
-  [-1.7796274664, -0.0002364244, 0.000003052, 3],       // deep in the antenna: beaded minibrot
-  [-0.10109636384562, 0.95628651080914, 3e-9, 3],       // Misiurewicz point: branching dendrite
-  [0.001643721971153, 0.822467633298876, 3e-10, 3],     // spoked spiral around a minibrot
+  // HD only: deep minibrots, found by Newton's method on their nucleus. They
+  // need continuous color and thousands of iterations (a single glyph in
+  // mb.py), and centers past double precision, so x and y are decimal text.
+  ["-0.774680159922181496040663", "0.137416181816513136424547", 2.14e-17, 3],  // seahorse valley: minibrot in a ring of petals (period 104)
+  ["-0.743643887037159272051", "0.131825904205312773330", 1.88e-14, 3],        // seahorse valley: haloed minibrot (period 1996)
+  ["-0.743644759349475005037683417224981", "0.131824721586421137398128336416238", 7.2e-27, 3],  // seahorse valley: sunburst minibrot (period 583)
+  ["-1.25065946995766675", "0.02012025532177806", 3.67e-10, 3],                // period-2 neck: ringed minibrot (period 474)
+  [-1.7796274664, -0.0002364244, 0.000003052, 3],                              // deep in the antenna: beaded minibrot
+  ["-0.10109636384560101273996017596265", "0.95628651080911019531233969556271", 1.25e-25, 3],  // Misiurewicz point: sunburst minibrot (period 105)
 ];
 
 const RAMP_STEPS = 80;
