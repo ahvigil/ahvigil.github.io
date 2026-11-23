@@ -5,8 +5,9 @@
 //   on which pixels are inside the set at deep views. A float32 precision
 //   glitch on the GPU shows up as missing or extra chunks of a minibrot.
 //
-// Run: node --test tests/      (skips if Chrome isn't found; set CHROME to its
-// path). SITE=<dir> serves another copy of the site (e.g. an older commit).
+// Run from mandelbrot/: npm test   (skips if Chrome isn't found; set CHROME to
+// its path). SITE=<dir> serves another copy of the site, a directory holding
+// mandelbrot/ (e.g. an older commit: git archive <rev> mandelbrot | tar -x -C <dir>).
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -16,7 +17,8 @@ const http = require("node:http");
 const zlib = require("node:zlib");
 const { spawn } = require("node:child_process");
 
-const SITE = path.resolve(process.env.SITE || path.join(__dirname, ".."));
+// The site root: the directory holding mandelbrot/ (served at /mandelbrot/).
+const SITE = path.resolve(process.env.SITE || path.join(__dirname, "..", ".."));
 const CHROME = process.env.CHROME || [
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser",

@@ -1,1 +1,3 @@
-exclude: ["Gemfile", "Gemfile.lock", "node_modules", "vendor", "docs", "tests", "package.json"]
+exclude: ["Gemfile", "Gemfile.lock", "node_modules", "vendor",
+          "mandelbrot/docs", "mandelbrot/tests", "mandelbrot/tools",
+          "mandelbrot/package.json", "mandelbrot/CLAUDE.md"]

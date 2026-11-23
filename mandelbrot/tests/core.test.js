@@ -1,8 +1,8 @@
 "use strict";
-// Unit tests for mandelbrot/core.js (pure math, no DOM). Run: node --test tests/
+// Unit tests for mandelbrot/core.js (pure math, no DOM). Run from mandelbrot/: npm test
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const core = require("../mandelbrot/core.js");
+const core = require("../core.js");
 
 const {
   LOCATIONS, orbitValue, perturbValue, orbitValues, bigFromString, bigFromDouble, bigToDouble,
