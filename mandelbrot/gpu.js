@@ -31,6 +31,9 @@ const gpuRenderer = (() => {
   const MAX_ITERS = 65536;
   const PASS_MAX = 512;          // iterations per pass (shader loop bound is 1024)
   const TARGET_MS = 9;           // GPU time per frame spent iterating
+  // ... and once the camera has settled on a final view: nothing moves then, so
+  // a frame can give more of itself to finishing the image sooner.
+  const SETTLED_MS = 13;
   const STATS_SAMPLES = 16000;
   const ZERO_E = -1000000;       // exponent of a zero floatexp value
   const DRAFT_MAX_FRAMES = 8;
@@ -497,9 +500,12 @@ void main() {
 
   // --- coloring (port of cpu.js colorRange) ---------------------------------------
 
+  // Every draft measures its colors, so this runs a few times a second during
+  // dives: values are sorted once, in place (Float64Array sorts numerically),
+  // and the sorted arrays serve the repeat count and every later recolor.
+  // `values` must be sorted.
   function equalize(values) {
     if (values.length < 50) return null;
-    values = Float64Array.from(values).sort();
     const lo = values[Math.floor(values.length * 0.01)];
     const hi = values[Math.floor(values.length * 0.98)];
     const quantiles = Array.from({ length: 257 }, (_, i) =>
@@ -507,23 +513,45 @@ void main() {
     return { lo, hi: Math.max(hi, lo + 1), quantiles, smooth: false };
   }
 
-  // samples = { trap: values (nonzero), smooth: values (nonzero) }
+  // samples[key], sorted in place on first use (only the kinds colorRange
+  // actually reads get sorted).
+  function sorted(samples, key) {
+    if (!samples.sorted[key]) {
+      samples[key].sort();
+      samples.sorted[key] = true;
+    }
+    return samples[key];
+  }
+
+  // Share of values equal to another one (1 - distinct / count), from sorted
+  // values: what new Set(values).size gives, without building the set.
+  function repeatShare(sorted) {
+    let distinct = sorted.length ? 1 : 0;
+    for (let i = 1; i < sorted.length; i++) {
+      const a = sorted[i], b = sorted[i - 1];
+      if (a !== b && (a === a || b === b)) distinct++;  // NaNs count once, as in a Set
+    }
+    return 1 - distinct / sorted.length;
+  }
+
+  // samples = { trap: Float64Array (nonzero), smooth: Float64Array (nonzero), sorted: {} }
   function colorRange(samples, maxColor) {
     const escape = () => {
-      const r = equalize(samples.smooth);
+      const r = equalize(sorted(samples, "smooth"));
       return r && { ...r, smooth: true };
     };
     if (colorMode === "escape") {
       const r = escape();
       if (r) return r;
     }
-    const trapValues = samples.trap;
-    const repeats = 1 - new Set(trapValues).size / trapValues.length;
-    const trap = equalize(trapValues);
-    if (colorMode === "auto" && trap && repeats > 0.05) {
+    const trapValues = sorted(samples, "trap");
+    // Flat orbit trap: switch to escape time (before equalizing the trap
+    // values, which would then go unused).
+    if (colorMode === "auto" && trapValues.length >= 50 && repeatShare(trapValues) > 0.05) {
       const r = escape();
       if (r) return r;
     }
+    const trap = equalize(trapValues);
     if (autoRange && trap) return trap;
     return { lo: -1, hi: maxColor - 1, quantiles: null, smooth: false };
   }
@@ -623,7 +651,7 @@ void main() {
       variant: fullStep > F32_MIN_STEP ? "f32" : "fe",
       limit, iterDone: 0, stage: "waitref", ref: null, centered: false, off: null,
       samples: null, range: null, prevInside: null, age: 0, frames: 0, overlay: false,
-      workCi: front ? 1 - front.ci : 0, doneOk: false, fence: null,
+      workCi: front ? 1 - front.ci : 0, doneOk: false, fence: null, rate: 0,
     };
     fade = null;  // job.workCi is the texture the fade was drawing from
     if (final) effIter = limit;
@@ -675,8 +703,15 @@ void main() {
 
   // --- budget -----------------------------------------------------------------------
 
-  let pxIterPerFrame = 2e7;      // pixel-iterations submitted per frame
-  let rate = 0;                  // measured pixel-iterations per ms (timer queries)
+  // A pixel-iteration's cost varies tenfold with content: an image's first
+  // passes iterate every pixel, its later ones mostly skip pixels that have
+  // escaped. So timer measurements are kept per job (later passes only get
+  // cheaper, so a job's last measurement is a safe rate for the rest of it),
+  // and a new job starts from what first frames have cost (`rate`), not from
+  // the cheap tail of the previous image, which overshot the budget several
+  // times over (frames of 50-150 ms in deep dives).
+  let pxIterPerFrame = 2e7;      // pixel-iterations submitted per frame (no timer)
+  let rate = 0;                  // measured pixel-iterations per ms on jobs' first frames
   let timerSeen = false;
   const queries = [];
   let lastT = 0, workedPrev = false, slowFrames = 0;
@@ -698,8 +733,8 @@ void main() {
         const ms = gl.getQueryParameter(e.q, gl.QUERY_RESULT) / 1e6;
         if (ms > 0.05) {
           const r = e.pxIters / ms;
-          rate = rate ? rate * 0.6 + r * 0.4 : r;
-          pxIterPerFrame = Math.min(5e10, Math.max(1e6, rate * TARGET_MS));
+          e.job.rate = r;
+          if (e.first) rate = !rate ? r : r < rate ? r : rate * 0.8 + r * 0.2;  // drops at once
           timerSeen = true;
         }
       }
@@ -758,13 +793,14 @@ void main() {
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, R.pbo);
     gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, buf);
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
-    const samples = { trap: [], smooth: [] };
-    let inside = 0;
+    const trap = new Float64Array(n), smooth = new Float64Array(n);
+    let inside = 0, nt = 0, ns = 0;
     for (let i = 0; i < n; i++) {
       const tv = buf[4 * i], sv = buf[4 * i + 1];
-      if (tv === 0) inside++; else samples.trap.push(buf[4 * i + 2] + 1 + buf[4 * i + 3]);
-      if (sv) samples.smooth.push(sv);
+      if (tv === 0) inside++; else trap[nt++] = buf[4 * i + 2] + 1 + buf[4 * i + 3];
+      if (sv) smooth[ns++] = sv;
     }
+    const samples = { trap: trap.subarray(0, nt), smooth: smooth.subarray(0, ns), sorted: {} };
     j.samples = samples;
     j.range = colorRange(samples, j.maxColor);
     // Drafts move the colors part of the way toward what's on screen now.
@@ -814,7 +850,7 @@ void main() {
 
   // --- per-frame work -----------------------------------------------------------------
 
-  function service() {
+  function service(settled) {
     if (queuedDraft) {
       const stale = !job || job.stage === "complete" || job.final ||
         (!job.final && (job.frames > DRAFT_MAX_FRAMES || job.stage === "waitref"));
@@ -833,7 +869,10 @@ void main() {
     if (j.stage === "waitref") tryBegin(j);
     if (j.stage === "iter") {
       const px = j.w * j.h;
-      const ipf = Math.max(16, Math.round(pxIterPerFrame / px));
+      const ms = j.final && settled ? SETTLED_MS : TARGET_MS;
+      const budget = timerSeen && (j.rate || rate)
+        ? Math.min(5e10, Math.max(1e6, (j.rate || rate) * ms)) : pxIterPerFrame;
+      const ipf = Math.max(16, Math.round(budget / px));
       const size = Math.min(ipf, PASS_MAX);
       let done = 0;
       const q = beginTimer();
@@ -845,21 +884,21 @@ void main() {
       }
       if (q) {
         gl.endQuery(timerExt.TIME_ELAPSED_EXT);
-        queries.push({ q, pxIters: done * px });
+        queries.push({ q, pxIters: done * px, job: j, first: j.frames === 0 });
       }
       j.frames++;
       worked = true;
       // Every image, drafts too, measures its colors (see pollStats).
       if (j.iterDone >= j.limit) {
+        // A growing final shows its progress: color its last passes once here,
+        // not on every frame spent waiting for the readback.
+        if (j.range && j.overlay) colorize(j, false, j.workCi, lastRange || j.range);
         issueReduce(j);
       } else if (j.range || lastRange) {
         j.overlay = colorize(j, false, j.workCi, lastRange || j.range);
       }
     }
-    if (j.stage === "stats") {
-      if (j.range && j.overlay) colorize(j, false, j.workCi, lastRange || j.range);
-      pollStats(j);
-    }
+    if (j.stage === "stats") pollStats(j);
     if (j.stage === "complete" && j.final && !j.doneOk && !inflight) j.doneOk = true;
     return worked;
   }
@@ -1010,7 +1049,8 @@ void main() {
       lastT = now;
       pollTimers();
       if (workedPrev) adaptFromFrameTime(dt);
-      workedPrev = service();
+      const settled = !!job && sameCam(cam, { center: job.t.center, distance: job.t.distance });
+      workedPrev = service(settled);
       if (dirty || !sameCam(cam, lastCam)) {
         draw(cam);
         dirty = !!fade;  // a color fade keeps redrawing until it ends
