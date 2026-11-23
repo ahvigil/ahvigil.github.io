@@ -189,3 +189,37 @@ test("auto coloring treats a flat or repetitive orbit trap as flat", () => {
   assert.equal(trapIsFlat(ramp(1000, 1, 200), 0.2), true, "many exact repeats");
   assert.equal(trapIsFlat(ramp(20, 1, 1.1), 0), false, "too few samples to judge");
 });
+
+test("every escape-time color mapping produces palette colors", () => {
+  const { renderBand, buildLut, PALETTE_NAMES } = core;
+  const width = 64, rows = 8, step = 0.02;
+  const lut = buildLut("ultra");
+  const job = { width, y0: 0, rows, xmin: -1.0, ymin: 0.2, step, iterations: 500, smooth: true, hd: false };
+  // Equal-area quantiles from the band's own values, as the renderers do.
+  const vals = [];
+  for (let p = 0; p < width * rows; p++) {
+    const v = core.orbitValue(job.xmin + (p % width) * step, job.ymin + Math.floor(p / width) * step, 500, true);
+    if (v) vals.push(v);
+  }
+  vals.sort((a, b) => a - b);
+  const quantiles = Array.from({ length: 257 }, (_, i) => vals[Math.floor((i / 256) * (vals.length - 1))]);
+  const colors = new Set();
+  for (let i = 0; i < lut.length; i += 3) colors.add(`${lut[i]},${lut[i + 1]},${lut[i + 2]}`);
+  for (const map of [0, 1, 2, 3]) {
+    const out = renderBand({ ...job, lo: vals[5], hi: vals[vals.length - 5], quantiles, map }, lut, null);
+    let distinct = new Set();
+    for (let o = 0; o < out.length; o += 4) {
+      const c = `${out[o]},${out[o + 1]},${out[o + 2]}`;
+      assert.equal(out[o + 3], 255, `map ${map}: opaque`);
+      assert.ok(c === "0,0,0" || colors.has(c), `map ${map}: ${c} is a palette color`);
+      distinct.add(c);
+    }
+    assert.ok(distinct.size > 20, `map ${map}: uses the palette (${distinct.size} colors)`);
+  }
+  assert.ok(PALETTE_NAMES.length >= 2);
+});
+
+test("tour stop names are unique", () => {
+  const names = LOCATIONS.map((l) => l[4]);
+  assert.equal(new Set(names).size, names.length);
+});

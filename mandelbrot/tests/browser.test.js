@@ -179,6 +179,74 @@ test("mandelbrot page in headless Chrome", { skip: !CHROME && "Chrome not found 
       assert.deepEqual(page.errors, []);
     });
 
+    await t.test("pause freezes a dive and resume continues it", async () => {
+      await render(page, base);
+      await page.evaluate("setAnim({ speed: 2 }); go(1); true");
+      await sleep(1500);
+      await page.evaluate("togglePause(); true");
+      const a = await page.evaluate("camera.cam.distance");
+      await sleep(800);
+      assert.equal(await page.evaluate("camera.cam.distance"), a, "camera moved while paused");
+      assert.equal(await page.evaluate("camera.animating() && paused"), true);
+      await page.evaluate("togglePause(); true");
+      await sleep(800);
+      assert.notEqual(await page.evaluate("camera.cam.distance"), a, "camera didn't resume");
+    });
+
+    await t.test("tour order: each round visits every stop once, neighbors apart", async () => {
+      const bad = await page.evaluate(`(() => {
+        const problems = [];
+        const near = (a, b) => Math.hypot(locations[a][0] - locations[b][0], locations[a][1] - locations[b][1]) < 0.05;
+        for (let k = 0; k < 200; k++) {
+          const first = k % n, o = shuffled(first);
+          if (o[0] !== first || o.length !== n || new Set(o).size !== n) problems.push("not a permutation: " + o);
+          for (let i = 1; i < o.length; i++) if (near(o[i - 1], o[i])) problems.push("neighbors adjacent: " + o);
+        }
+        return problems.slice(0, 3);
+      })()`);
+      assert.deepEqual(bad, []);
+    });
+
+    await t.test("URL parameters set the settings; bad values fall back", async () => {
+      const state = "JSON.stringify({ r: rendererPref, scale: iterationScale, speed: anim.speed, dive: anim.dive, map: colorMap, color: colorMode, palette, auto: autoRange, hd: hiRes })";
+      await page.send("Page.navigate", { url: `${base}?renderer=cpu&scale=4&speed=fast&dive=0&map=bands&color=escape&palette=ice&auto=0&hd=1&once` });
+      await sleep(800);
+      assert.deepEqual(JSON.parse(await page.evaluate(state)),
+        { r: "cpu", scale: 4, speed: 6, dive: false, map: "bands", color: "escape", palette: "ice", auto: false, hd: true });
+      await page.send("Page.navigate", { url: `${base}?renderer=nope&scale=-2&speed=bogus&map=nope&color=nope&palette=nope&once` });
+      await sleep(800);
+      const d = JSON.parse(await page.evaluate(state));
+      assert.equal(d.scale, 1);
+      assert.ok(d.speed > 0 && d.speed !== 6);
+      assert.ok(["auto", "gpu", "cpu"].includes(d.r));
+      assert.ok(["equal", "blend", "bands", "cycles"].includes(d.map));
+      assert.equal(d.color, "auto");
+      assert.ok(d.palette !== "nope");
+    });
+
+    await t.test("HUD and buttons stay on screen and apart at common sizes", async () => {
+      const sizes = [[390, 844, true], [844, 390, true], [360, 640, true], [820, 1180, true], [660, 500, false], [1280, 800, false]];
+      try {
+        for (const [w, h, touch] of sizes) {
+          await page.send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: touch });
+          await page.send("Emulation.setTouchEmulationEnabled", { enabled: touch, maxTouchPoints: touch ? 5 : 0 });
+          await page.send("Page.navigate", { url: `${base}?location=1&once` });
+          await sleep(800);
+          for (const m of ["tour", "explore"]) {
+            const r = JSON.parse(await page.evaluate(`mode = "${m}"; updateHud("", 60000);
+              JSON.stringify((() => { const h = hud.getBoundingClientRect(), b = document.getElementById("mb-bar").getBoundingClientRect();
+                return { overlap: !(h.right <= b.left || b.right <= h.left || h.bottom <= b.top || b.bottom <= h.top),
+                         offscreen: h.left < 0 || h.right > innerWidth || h.top < 0 || h.bottom > innerHeight ||
+                                    b.left < 0 || b.right > innerWidth || b.top < 0 || b.bottom > innerHeight }; })())`));
+            assert.deepEqual(r, { overlap: false, offscreen: false }, `${w}x${h} ${touch ? "touch" : "mouse"} ${m}`);
+          }
+        }
+      } finally {
+        await page.send("Emulation.setTouchEmulationEnabled", { enabled: false, maxTouchPoints: 0 });
+        await page.send("Emulation.setDeviceMetricsOverride", { width: WIDTH, height: HEIGHT, deviceScaleFactor: 1, mobile: false });
+      }
+    });
+
     const gpu = await page.evaluate("gpuRenderer.available");
     for (const view of VIEWS) {
       await t.test(`GPU matches CPU inside the set: ${view.name}`, { skip: !gpu && "no WebGL2 here" }, async () => {

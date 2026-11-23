@@ -26,22 +26,59 @@ URL parameter; read it first.
 
 - Open `index.html` directly (`file://` works) or serve the repo root:
   `python3 -m http.server 8000` and go to `http://localhost:8000/mandelbrot/`.
-- `cd mandelbrot && npm test` runs everything with Node's built-in runner
-  (Node 22+; no packages to install):
-  - `tests/core.test.js`: unit tests for `core.js`. Reference orbits must
-    match naive BigInt iteration bit for bit, `orbitValues` must match
-    `orbitValue` / `perturbValue` pixel for pixel, perturbation must agree
-    with direct and exact iteration, and the stops must be well formed.
-  - `tests/browser.test.js`: headless Chrome (skipped if Chrome isn't
-    found; set `CHROME=`). The page must load and dive with no exceptions
-    or `console.error`. At deep minibrots the GPU and CPU renderers, at the
-    same iteration count, must agree on which pixels are inside the set.
-    This test catches float32 precision glitches.
-  - To check an old commit: `git archive <rev> mandelbrot | tar -x -C /tmp/old`,
-    then `SITE=/tmp/old npm test`.
-- Headless Chrome on a Mac uses the real GPU, so the GPU path really is
-  tested. If a port is busy, another server may be serving a different
-  copy of the code. The tests pick a free port themselves.
+### Tests
+
+Requirements: Node 22 or newer, with no packages to install (Node's built-in
+test runner), and Google Chrome or Chromium for the browser tests.
+
+```sh
+cd mandelbrot
+npm test                                  # everything, about 30 s
+node --test tests/core.test.js            # unit tests only, under 1 s
+node --test tests/browser.test.js         # browser tests only
+node --test --test-name-pattern="GPU matches" tests/   # tests whose name matches
+```
+
+Environment variables:
+- `CHROME=/path/to/chrome`: use this browser. Without it, the tests look for
+  Google Chrome on macOS and `google-chrome` / `chromium` on Linux. If none
+  is found, the browser tests are skipped, not failed.
+- `SITE=/some/dir`: serve another copy of the site, a directory holding
+  `mandelbrot/`. To test an old commit:
+  `mkdir /tmp/old && git archive <rev> mandelbrot | tar -x -C /tmp/old`,
+  then `SITE=/tmp/old npm test`.
+
+`tests/core.test.js` covers `core.js` alone, without a browser:
+- The tour stops are well formed: five fields, names unique, depths from
+  1e-20 to 6.75.
+- Big decimal numbers round-trip exactly.
+- Reference orbits match naive BigInt iteration bit for bit, including
+  when extended in steps.
+- `orbitValues` matches `orbitValue` / `perturbValue` pixel for pixel.
+- Perturbation agrees with direct and exact iteration.
+- The auto-coloring rule (`trapIsFlat`) behaves as expected.
+- Every escape-time color mapping produces palette colors.
+
+`tests/browser.test.js` loads the real page in headless Chrome. It serves
+the site itself on a free port and uses a throwaway browser profile.
+- The tour loads and dives with no exceptions and no `console.error`.
+  `gpu.js` logs an error if a GPU pass runs past its reference orbit.
+- Space freezes a dive, and resuming continues it.
+- Every shuffled round visits each stop once, keeping nearby stops apart.
+- URL parameters set the settings, and bad values fall back.
+- The HUD and button bar stay on screen and apart, at phone, tablet and
+  desktop sizes, with mouse and with touch.
+- At deep minibrots, the GPU and CPU (hi-res) renderers agree on which
+  pixels are inside the set, at the same iteration count. This catches
+  float32 precision glitches (it fails on the code before f6c8ffb).
+
+Headless Chrome on a Mac uses the real GPU, so the GPU path really is
+tested. On machines without WebGL2, the GPU-vs-CPU checks are skipped.
+
+When a browser test fails:
+- Re-run just that test with `--test-name-pattern`.
+- For the GPU-vs-CPU checks, set `DUMP=/some/dir` to save both renders as
+  `.ppm` images.
 
 ## Deploying
 
