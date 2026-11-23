@@ -17,13 +17,14 @@ const camera = (() => {
   const DIVE_APEX = 6.75 * 2;         // highest a dive may climb
   // Fastest a click zoom or dive may go, in e-folds of zoom (or the
   // equivalent pan) per second at the peak of the ease, so both move at the
-  // same pace. Animations stretch past their configured duration to stay
-  // under it.
-  const MAX_SPEED = 2;
+  // same pace: the page's anim.speed (settings: camera speed).
+  const DEFAULT_SPEED = 2;
+  const maxSpeed = () => (anim && anim.speed > 0 ? anim.speed : DEFAULT_SPEED);
   const WHEEL_SETTLE_MS = 150;
   const DRAG_PX = 4;
 
-  let run = null;                     // { t0, dur, at(u) -> cam, end: target }
+  let run = null;                     // { t0, dur, at(u) -> cam, end: target, pausedAt }
+  let pauseShown = false;             // final render of a paused dive's view sent
   let wheelUntil = 0;
   let needFinal = false;              // a final target is owed once settled
   let forceFinal = false;
@@ -73,7 +74,7 @@ const camera = (() => {
       const k = (1 - e) * distance / 3 / w;
       return { center: offsetCenter(t.center, -s0x * k, -s0y * k, distance), distance };
     };
-    return { at, minMs: EASE_PEAK * length / MAX_SPEED * 1000 };
+    return { at, minMs: EASE_PEAK * length / maxSpeed() * 1000 };
   }
 
   // van Wijk & Nuij smooth zoom and pan (as in d3.interpolateZoom), with
@@ -134,7 +135,7 @@ const camera = (() => {
       peak = Math.max(peak, Math.hypot(zoom, pan) * 256);
       prev = next;
     }
-    const minMs = EASE_PEAK * peak / MAX_SPEED * 1000;
+    const minMs = EASE_PEAK * peak / maxSpeed() * 1000;
     const at = (u) => {
       const { f, w } = path.at(ease(u));
       const distance = Math.min(Math.max(w * scale, Math.min(w0, w1) * 0.5), Math.max(DIVE_APEX, w0, w1));
@@ -257,7 +258,7 @@ const camera = (() => {
   function loop(now) {
     requestAnimationFrame(loop);
     if (!api.cam) return;
-    if (run) {
+    if (run && !run.pausedAt) {
       const u = (now - run.t0) / run.dur;
       if (u >= 1) {
         api.cam = { center: run.end.center, distance: run.end.distance };
@@ -266,13 +267,24 @@ const camera = (() => {
         api.cam = run.at(Math.max(u, 0));
       }
     }
-    const moving = !!run || pointers.size > 0 || now < wheelUntil;
+    const paused = !!run && !!run.pausedAt;
+    const moving = (!!run && !paused) || pointers.size > 0 || now < wheelUntil;
     if (moving) {
       // Click zoom-ins skip drafts: the current image, stretched, already
       // covers the screen (see startAnim).
       if (api.cam !== lastDraft && api.target && !(run && !run.drafts)) {
         lastDraft = api.cam;
         renderer.setTarget({ center: api.cam.center, distance: api.cam.distance, maxColor: api.target.maxColor, final: false });
+      }
+    } else if (paused) {
+      // Frozen mid-dive: render what's on screen at full quality (without
+      // reporting it as the page's target being done).
+      if ((!pauseShown || forceFinal) && api.target) {
+        renderer.setTarget({ center: api.cam.center, distance: api.cam.distance,
+                             maxColor: api.target.maxColor, final: true, force: forceFinal });
+        pauseShown = true;
+        forceFinal = false;
+        lastDraft = null;
       }
     } else if (needFinal && api.target) {
       sendFinal();
@@ -346,6 +358,19 @@ const camera = (() => {
       forceFinal = true;
       awaiting = true;
     },
+    // Freezes an animation where it is (resume() carries on from there).
+    pause() {
+      if (!run || run.pausedAt) return;
+      run.pausedAt = performance.now();
+      pauseShown = false;
+    },
+    resume() {
+      if (!run || !run.pausedAt) return;
+      run.t0 += performance.now() - run.pausedAt;
+      run.pausedAt = 0;
+      lastDraft = null;
+    },
+    animating() { return !!run; },
   };
   return api;
 })();

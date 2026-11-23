@@ -1,23 +1,36 @@
 "use strict";
 /*
- * Settings dialog and gear button. Every control calls the page's setter
+ * Settings dialog and the on-screen button bar (previous / play-pause / next
+ * for the tour, and the settings gear). Every control calls the page's setter
  * immediately; control values are re-read from the page globals whenever the
  * dialog opens and after each change. All DOM is created in init().
+ *
+ * The bar fades in on activity and out after 3 s idle; on touch screens
+ * (coarse pointer), where there are no keys, it stays visible.
  */
 const settings = (() => {
   const CSS = `
-  #mb-gear {
-    position: fixed; left: 12px; bottom: 10px; width: 30px; height: 28px; padding: 0;
+  #mb-bar {
+    position: fixed; left: 12px; bottom: 10px; display: flex; gap: 4px;
+    opacity: 0; transition: opacity 0.6s;
+  }
+  #mb-bar button {
+    width: 30px; height: 28px; padding: 0;
     display: flex; align-items: center; justify-content: center;
     background: rgba(0, 0, 0, 0.85); color: #bbb; border: 0; border-radius: 3px;
-    font: 16px/1 ui-monospace, Menlo, Consolas, monospace; cursor: pointer;
-    opacity: 0; transition: opacity 0.6s; touch-action: manipulation;
+    font: 14px/1 ui-monospace, Menlo, Consolas, monospace; cursor: pointer;
+    touch-action: manipulation;
     pointer-events: none;  /* invisible: clicks go to the stage */
   }
-  #mb-gear.show, #mb-gear:focus-visible { opacity: 1; transition: none; pointer-events: auto; }
-  #mb-gear:hover { color: #fff; }
-  #mb-gear:focus-visible { outline: 2px solid #8ab4f8; outline-offset: 1px; }
-  @media (prefers-reduced-motion: reduce) { #mb-gear { transition: none; } }
+  #mb-bar.show, #mb-bar:focus-within { opacity: 1; transition: none; }
+  #mb-bar.show button, #mb-bar:focus-within button { pointer-events: auto; }
+  #mb-bar button:hover { color: #fff; }
+  #mb-bar button:focus-visible { outline: 2px solid #8ab4f8; outline-offset: 1px; }
+  @media (pointer: coarse) {
+    #mb-bar { opacity: 1; }
+    #mb-bar button { pointer-events: auto; width: 40px; height: 36px; font-size: 16px; }
+  }
+  @media (prefers-reduced-motion: reduce) { #mb-bar { transition: none; } }
   #mb-settings {
     box-sizing: border-box; width: 26rem; max-width: 92vw; max-height: 88vh; overflow: auto;
     padding: 12px 16px 14px; margin: auto; border: 1px solid #333; border-radius: 4px;
@@ -47,7 +60,9 @@ const settings = (() => {
   const scaleLabel = (s) => (s < 1 ? `×1/${1 / s}` : `×${s}`);
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
-  let gear, dlg, hideTimer = 0;
+  const SPEEDS = [["1.25", "slow"], ["2", "relaxed"], ["3.5", "brisk"], ["6", "fast"]];
+
+  let bar, gear, playBtn, dlg, hideTimer = 0;
   const els = {};
 
   function el(tag, props, ...kids) {
@@ -94,19 +109,38 @@ const settings = (() => {
     els.auto.checked = !!autoRange;
     els.palette.value = palette;
     els.iter.value = String(iterationScale);
-    els.clickMs.value = anim.clickMs;
+    els.speed.value = String(anim.speed || 2);
     els.dive.checked = !!anim.dive;
-    els.diveMs.value = +(anim.diveMs / 1000).toFixed(2);
-    els.diveMs.disabled = !anim.dive;
     els.hold.value = +(hold / 1000).toFixed(2);
+  }
+
+  // The play button shows what pressing it does.
+  function update() {
+    if (!playBtn) return;
+    const [glyph, label] = mode === "explore" ? ["▶", "Back to the tour"]
+      : paused ? ["▶", "Resume the tour"] : ["❚❚", "Pause the tour"];
+    playBtn.textContent = glyph;
+    playBtn.title = label + " (space)";
+    playBtn.setAttribute("aria-label", label);
   }
 
   function build() {
     document.head.append(el("style", { textContent: CSS }));
 
-    gear = el("button", { id: "mb-gear", type: "button", title: "Settings (s)", textContent: "⚙" });
-    gear.setAttribute("aria-label", "Settings");
+    const button = (glyph, label, title) => {
+      const b = el("button", { type: "button", title, textContent: glyph });
+      b.setAttribute("aria-label", label);
+      return b;
+    };
+    const prevBtn = button("‹", "Previous stop", "Previous stop (←)");
+    playBtn = button("❚❚", "Pause the tour", "Pause the tour (space)");
+    const nextBtn = button("›", "Next stop", "Next stop (→)");
+    gear = button("⚙", "Settings", "Settings (s)");
+    gear.id = "mb-gear";
     gear.setAttribute("aria-haspopup", "dialog");
+    bar = el("div", { id: "mb-bar" }, prevBtn, playBtn, nextBtn, gear);
+    bar.setAttribute("role", "toolbar");
+    bar.setAttribute("aria-label", "Tour");
 
     els.rendererNote = el("div", { className: "note" });
     els.hiresNote = el("div", { className: "note" });
@@ -131,29 +165,33 @@ const settings = (() => {
         row("auto", "Auto color range", checkbox()),
         row("palette", "Palette", select(palOpts))),
       group("Animation",
-        row("clickMs", "Click zoom (ms)", number(0, 2000, 50)),
+        row("speed", "Camera speed", select(SPEEDS)),
         row("dive", "Tour dive", checkbox()),
-        row("diveMs", "Dive duration (s)", number(1, 20, 0.5)),
         row("hold", "Hold at stop (s)", number(0, 60, 1))));
     dlg.setAttribute("aria-labelledby", "mb-s-title");
-    document.body.append(gear, dlg);
+    document.body.append(bar, dlg);
 
     // Fade-in on activity, fade out after 3 s idle.
     const wake = () => {
-      gear.classList.add("show");
+      bar.classList.add("show");
       clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => gear.classList.remove("show"), 3000);
+      hideTimer = setTimeout(() => bar.classList.remove("show"), 3000);
     };
     for (const ev of ["mousemove", "pointerdown", "touchstart", "keydown"]) {
       document.addEventListener(ev, wake, { passive: true });
     }
     wake();
 
-    // Keep gear events away from the stage.
-    for (const ev of ["pointerdown", "pointerup", "mousedown", "mouseup", "touchstart", "touchend", "dblclick"]) {
-      gear.addEventListener(ev, (e) => e.stopPropagation());
+    // Keep the bar's events away from the stage.
+    for (const ev of ["pointerdown", "pointerup", "mousedown", "mouseup", "touchstart", "touchend", "dblclick", "wheel"]) {
+      bar.addEventListener(ev, (e) => e.stopPropagation(), { passive: true });
     }
-    gear.addEventListener("click", (e) => { e.stopPropagation(); open(); });
+    const onClick = (b, fn) => b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+    onClick(prevBtn, () => go(-1));
+    onClick(playBtn, togglePause);
+    onClick(nextBtn, () => go(1));
+    onClick(gear, open);
+    update();
 
     closeBtn.addEventListener("click", close);
     dlg.addEventListener("click", (e) => {
@@ -185,6 +223,7 @@ const settings = (() => {
     els.palette.addEventListener("change", changed(() => setPalette(els.palette.value)));
     els.iter.addEventListener("change", changed(() => setIterationScale(Number(els.iter.value))));
     els.dive.addEventListener("change", changed(() => setAnim({ dive: els.dive.checked })));
+    els.speed.addEventListener("change", changed(() => setAnim({ speed: Number(els.speed.value) })));
 
     // Number inputs apply on input (when valid) and re-sync on change (blur/enter).
     const num = (input, lo, hi, apply) => {
@@ -192,8 +231,6 @@ const settings = (() => {
       input.addEventListener("input", () => go(false));
       input.addEventListener("change", () => { go(true); sync(); });
     };
-    num(els.clickMs, 0, 2000, (v) => setAnim({ clickMs: Math.round(v) }));
-    num(els.diveMs, 1, 20, (v) => setAnim({ diveMs: Math.round(v * 1000) }));
     num(els.hold, 0, 60, (v) => setAnim({ hold: Math.round(v * 1000) }));
   }
 
@@ -208,6 +245,7 @@ const settings = (() => {
     init() { build(); },
     open,
     close,
+    update,
     isOpen() { return !!dlg && dlg.open; },
   };
 })();

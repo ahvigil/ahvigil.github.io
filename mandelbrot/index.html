@@ -33,12 +33,23 @@
     color: #bbb;
     border-radius: 3px;
     font: 12px ui-monospace, Menlo, Consolas, monospace;
-    white-space: pre;
+    white-space: pre-wrap;
+    max-width: calc(100vw - 24px);
+    box-sizing: border-box;
     opacity: 0;
     transition: opacity 0.6s;
     pointer-events: none;
   }
   #hud.show { opacity: 1; transition: none; }
+  /* Narrow screens: the tour buttons take the bottom edge. */
+  @media (max-width: 640px) {
+    #hud { top: 10px; bottom: auto; left: 12px; right: 12px; }
+  }
+  @media (prefers-reduced-motion: reduce) { #hud { transition: none; } }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap;
+  }
 </style>
 </head>
 <body>
@@ -47,6 +58,7 @@
   <canvas id="cpu"></canvas>
 </div>
 <div id="hud"></div>
+<div id="announce" class="sr-only" aria-live="polite"></div>
 <script src="core.js"></script>
 <script src="cpu.js"></script>
 <script src="gpu.js"></script>
@@ -149,7 +161,9 @@ let LUT = buildLut(palette);
 // Tour stops as numbers; deep stops give x and y as decimal text, which
 // TOUR_CENTERS keeps exactly.
 const TOUR = LOCATIONS.map(([x, y, d, m]) => [Number(x), Number(y), d, m]);
+const TOUR_NAMES = LOCATIONS.map((l) => l[4] || "");
 let locations = TOUR;
+let names = TOUR_NAMES;
 let once = params.has("once");
 const atText = (params.get("at") || "").split(",");
 const at = atText.map(Number);
@@ -165,6 +179,7 @@ if (at.length >= 3 && at.length <= 4 && at.every(Number.isFinite)) {
   const bits = precisionFor(at[2] / 3 / 8192);
   const exact = (k) => bigFromString(atText[k], bits) || bigFromDouble(at[k], bits);
   centers = [{ x: exact(0), y: exact(1) }];
+  names = [""];
   once = true;
 }
 let n = locations.length;
@@ -172,14 +187,21 @@ let iterations = Math.max(1, Math.floor(num("iterations", 500)));
 let current = ((Math.floor(num("location", 0)) % n) + n) % n;  // stop on screen (index into locations)
 // The tour visits the stops in random order: `order` is a shuffle of all
 // of them starting with `first`, reshuffled each time round; `pos` is the
-// position in it.
+// position in it. Stops in the same neighborhood (centers within 0.05) are
+// kept apart, so a short hop isn't followed by a long dive back out.
 function shuffled(first) {
-  const rest = [...Array(n).keys()].filter((i) => i !== first);
-  for (let i = rest.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [rest[i], rest[j]] = [rest[j], rest[i]];
+  const near = (a, b) => Math.hypot(locations[a][0] - locations[b][0], locations[a][1] - locations[b][1]) < 0.05;
+  let best = null;
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const rest = [...Array(n).keys()].filter((i) => i !== first);
+    for (let i = rest.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [rest[i], rest[j]] = [rest[j], rest[i]];
+    }
+    best = [first, ...rest];
+    if (best.every((s, i) => i === 0 || !near(best[i - 1], s))) break;
   }
-  return [first, ...rest];
+  return best;
 }
 let order = shuffled(current), pos = 0;
 let view = locations[current].slice();  // [x, y, distance, maxColor] of the target
@@ -192,8 +214,14 @@ let rendered = false;
 let autoRange = params.get("auto") !== "0";  // stretch colors to what's on screen
 const COLOR_MODES = ["auto", "trap", "escape"];  // orbit trap, escape time, or pick
 let colorMode = COLOR_MODES.includes(params.get("color")) ? params.get("color") : "auto";
-let anim = { clickMs: 500, dive: true, diveMs: 4000 };
+// Camera speed (e-folds per second at peak, see camera.js) and the minimum
+// click-zoom and dive durations it may stretch.
+let anim = { clickMs: 500, dive: true, diveMs: 4000, speed: 2 };
 try { anim = { ...anim, ...JSON.parse(stored("mb-anim") || "{}") }; } catch (err) { /* ignore */ }
+// The click-zoom and dive durations are no longer settings (camera speed
+// replaced them): ignore values saved by older versions.
+anim.clickMs = 500;
+anim.diveMs = 4000;
 // Tour hold (ms): ?hold= wins, then the saved preference, then 5 s.
 let hold = params.has("hold") ? Math.max(0, num("hold", 5)) * 1000
   : Number.isFinite(anim.hold) ? Math.max(0, anim.hold) : 5000;
@@ -288,23 +316,52 @@ function colorInfo() {
   return `${palette}, ${colorMode} color: ${coloring}, ${precision}`;
 }
 
-function showHud(text, sticky = false) {
+function showHud(text, sticky = false, ms = 3000) {
   hud.textContent = text;
   hud.classList.add("show");
   clearTimeout(hudTimer);
-  if (!sticky) hudTimer = setTimeout(() => hud.classList.remove("show"), 3000);
+  if (!sticky) hudTimer = setTimeout(() => hud.classList.remove("show"), ms);
 }
 
-function updateHud(extra = "") {
+const touch = () => !!(window.matchMedia && matchMedia("(pointer: coarse)").matches);
+
+// Magnification of what's on screen now (the camera, not the target).
+function zoomText() {
+  const m = 6.75 / (camera.cam ? camera.cam.distance : view[2]);
+  return "zoom ×" + (m < 1000 ? m.toFixed(m < 10 ? 1 : 0) : m.toExponential(1).replace("e+", "e"));
+}
+
+function updateHud(extra = "", ms) {
   if (mode === "explore") {
+    const keys = touch()
+      ? "tap: zoom in  drag: pan  pinch: zoom  ▶: back to the tour"
+      : "click: in  shift-click: out  wheel: zoom  drag: pan  p: palette  a: auto color\n" +
+        "[ ]: color range  - +: iterations  h: hi-res  o: coloring  c: copy  s: settings  r: reset";
     showHud(`${coords()}   iterations ${renderer.status().effectiveIterations}   ${colorInfo()}${extra}\n` +
-            "click: in  shift-click: out  wheel: zoom  drag: pan  p: palette  a: auto color\n" +
-            "[ ]: color range  - +: iterations  h: hi-res  o: coloring  c: copy  s: settings  r: reset  esc: back", true);
+            `tour paused: ${touch() ? "▶" : "space or esc"} to resume\n${keys}`, true);
   } else {
-    const distance = view[2];
-    showHud(`${pos + 1}/${n}  ${fmt(center.x, distance)}, ${fmt(center.y, distance)}  distance ${distance}   ${colorInfo()}` +
-            `${paused ? "  (paused)" : ""}${extra}`, paused);
+    const moving = camera.animating();
+    const state = paused ? "  (paused)" : "";
+    const keys = touch() ? "" : "\nspace: pause  ← →: previous/next  click: explore  s: settings";
+    showHud(`${pos + 1}/${n}  ${moving ? "→ " : ""}${names[current]}\n${zoomText()}${state}${extra}${keys}`,
+            paused || moving, ms);
   }
+  settings.update();
+}
+
+// While the camera glides between stops, keep the HUD's zoom current.
+setInterval(() => {
+  if (mode === "tour" && camera.animating() && hud.classList.contains("show")) updateHud();
+}, 250);
+
+// Space and the on-screen play button: in the tour, pause or resume (a
+// dive freezes where it is); while exploring, back to the tour.
+function togglePause() {
+  if (mode === "explore") { go(0); return; }
+  paused = !paused;
+  if (paused) camera.pause(); else camera.resume();
+  scheduleAdvance();
+  updateHud();
 }
 
 // Mirrors the current view into the URL, so reloading picks up from here.
@@ -361,6 +418,7 @@ function scheduleAdvance() {
 function resetTour() {
   locations = TOUR;
   centers = TOUR_CENTERS;
+  names = TOUR_NAMES;
   n = TOUR.length;
   once = false;
   paused = false;
@@ -378,6 +436,7 @@ function go(delta) {
   if (pos >= n) { order = shuffled(current); pos = n > 1 ? 1 : 0; }  // next round, new order
   else if (pos < 0) pos = n - 1;
   current = order[pos];
+  if (names[current]) document.getElementById("announce").textContent = names[current];
   center = centers[current];
   show(locations[current].slice(), moving && anim.dive && renderer.name === "gpu" ? "dive" : "jump");
   updateHud();
@@ -431,15 +490,14 @@ function moveTo(c, distance) {
 // --- keys --------------------------------------------------------------------------
 
 document.addEventListener("keydown", (e) => {
-  if (settings.isOpen() || (e.target instanceof Element && e.target.closest("input, select, textarea, dialog"))) return;
+  // Buttons keep Space and Enter for themselves.
+  if (settings.isOpen() || (e.target instanceof Element && e.target.closest("input, select, textarea, dialog, button"))) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  switch (e.key) {
+  // Letters work with Caps Lock or Shift too.
+  switch (e.key.length === 1 ? e.key.toLowerCase() : e.key) {
     case " ":
       e.preventDefault();
-      if (mode === "explore") { go(0); break; }
-      paused = !paused;
-      scheduleAdvance();
-      updateHud();
+      togglePause();
       break;
     case "n": case "ArrowRight": go(1); break;
     case "ArrowLeft": go(-1); break;
@@ -485,7 +543,7 @@ settings.init();
 setRenderer(rendererPref);
 resize();
 show(view);
-showHud(`${pos + 1}/${n}   click: zoom in  space: pause  n: next  p: palette  a: auto color  h: hi-res  o: coloring  s: settings  r: reset`);
+updateHud("", 8000);
 </script>
 </body>
 </html>

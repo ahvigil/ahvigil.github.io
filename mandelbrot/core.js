@@ -8,24 +8,23 @@
  * are shipped to workers via Function.prototype.toString().
  */
 
-// Tour stops: [x, y, distance, maxColor] (mb.py keeps its own list). The
-// view's horizontal span is distance / 3, so framing matches the terminal
-// version.
+// Tour stops: [x, y, distance, maxColor, name] (mb.py keeps its own list).
+// The view's horizontal span is distance / 3, so framing matches the
+// terminal version. Deep stops are minibrots found by Newton's method on
+// their nucleus (period in the comment); their centers are past double
+// precision, so x and y are decimal text.
 const LOCATIONS = [
-  [-0.5, 0.0, 6.75, 256],
-  // HD only: deep minibrots, found by Newton's method on their nucleus. They
-  // need continuous color and thousands of iterations (a single glyph in
-  // mb.py), and centers past double precision, so x and y are decimal text.
-  ["-0.774680159922181496040663", "0.137416181816513136424547", 2.14e-17, 3],  // seahorse valley: minibrot in a ring of petals (period 104)
-  ["-0.743643887037159272051", "0.131825904205312773330", 1.88e-14, 3],        // seahorse valley: haloed minibrot (period 1996)
-  ["-0.743643887033966697174", "0.131825905961948466072", 2.14e-12, 3],        // seahorse valley: minibrot in a lattice (period 973)
-  ["-1.25065946995766675", "0.02012025532177806", 3.67e-10, 3],                // period-2 neck: ringed minibrot (period 474)
-  [-1.7796274664, -0.0002364244, 0.000003052, 3],                              // deep in the antenna: beaded minibrot
-  ["-1.999999117587260825", "0", 1.26e-11, 3],                                 // antenna tip: star-shaped minibrot (period 12)
-  ["-0.101096364173753089038111", "0.956286510868534825551945", 9.72e-18, 3],  // Misiurewicz point: sunburst minibrot (period 73)
-  ["-0.160701350082826767863022", "1.037566500011069953631349", 1.01e-16, 3],  // top tendril: minibrot with spiral arms (period 824)
-  ["0.254987024152377390669", "0.000567988193082191722", 4.57e-13, 3],          // near the cusp: four-lobed minibrot in ribbons (period 494)
-  ["0.2549870375310423776490622441", "0.0005679790525271306303794810", 2.23e-20, 3],  // near the cusp: minibrot in concentric rings (period 883)
+  [-0.5, 0.0, 6.75, 256, "the whole set"],
+  ["-0.774680159922181496040663", "0.137416181816513136424547", 2.14e-17, 3, "seahorse valley: minibrot in a ring of petals"],  // period 104
+  ["-0.743643887037159272051", "0.131825904205312773330", 1.88e-14, 3, "seahorse valley: haloed minibrot"],  // period 1996
+  ["-0.743643887033966697174", "0.131825905961948466072", 2.14e-12, 3, "seahorse valley: minibrot in a lattice"],  // period 973
+  ["-1.25065946995766675", "0.02012025532177806", 3.67e-10, 3, "period-2 neck: ringed minibrot"],  // period 474
+  [-1.7796274664, -0.0002364244, 0.000003052, 3, "deep in the antenna: beaded minibrot"],
+  ["-1.999999117587260825", "0", 1.26e-11, 3, "antenna tip: star-shaped minibrot"],  // period 12
+  ["-0.101096364173753089038111", "0.956286510868534825551945", 9.72e-18, 3, "Misiurewicz point: sunburst minibrot"],  // period 73
+  ["-0.160701350082826767863022", "1.037566500011069953631349", 1.01e-16, 3, "top tendril: minibrot with spiral arms"],  // period 824
+  ["0.254987024152377390669", "0.000567988193082191722", 4.57e-13, 3, "near the cusp: four-lobed minibrot in ribbons"],  // period 494
+  ["0.2549870375310423776490622441", "0.0005679790525271306303794810", 2.23e-20, 3, "near the cusp: minibrot in concentric rings"],  // period 883
 ];
 
 const RAMP_STEPS = 80;
