@@ -19,7 +19,7 @@ const camera = (() => {
   // equivalent pan) per second at the peak of the ease, so both move at the
   // same pace. Animations stretch past their configured duration to stay
   // under it.
-  const MAX_SPEED = 3.5;
+  const MAX_SPEED = 2;
   const WHEEL_SETTLE_MS = 150;
   const DRAG_PX = 4;
 
